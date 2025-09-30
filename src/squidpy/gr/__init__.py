@@ -9,3 +9,4 @@ from squidpy.gr._niche import calculate_niche
 from squidpy.gr._ppatterns import co_occurrence, spatial_autocorr
 from squidpy.gr._ripley import ripley
 from squidpy.gr._sepal import sepal
+from squidpy.gr._sepal_conf import sepal as sepal_config
