@@ -298,24 +298,25 @@ def _diffusion_impl(
 ) -> float:
     """Simulate diffusion process on a regular graph."""
     sat_shape, conc_shape = sat.shape[0], conc.shape[0]
-    entropy_arr = np.zeros(n_iter)
-    prev_ent = 1.0
-    nhood = np.zeros(sat_shape)
-    weights = np.ones(sat_shape)
+    # Use float64 for the entropy array
+    entropy_arr = np.zeros(n_iter, dtype=np.float64)
+    prev_ent = np.float64(1.0)
+    nhood = np.zeros(sat_shape, dtype=np.float64)
+    weights = np.ones(sat_shape, dtype=np.float64)
 
     for i in range(n_iter):
         for j in range(sat_shape):
-            nhood[j] = np.sum(conc[sat_idx[j]])
+            nhood[j] = np.sum(conc[sat_idx[j]], dtype=np.float64)
         d2 = laplacian(conc[sat], nhood, weights)
 
-        dcdt = np.zeros(conc_shape)
+        dcdt = np.zeros(conc_shape, dtype=np.float64)
         dcdt[sat] = D * d2
         conc[sat] += dcdt[sat] * dt
         conc[unsat] += dcdt[unsat_idx] * dt
         # set values below zero to 0
         conc[conc < 0] = 0
-        # compute entropy
-        ent = _entropy_func(conc[sat]) / sat_shape
+        # compute entropy with float64 precision
+        ent = np.float64(_entropy_func(conc[sat])) / np.float64(sat_shape)
         entropy_arr[i] = np.abs(ent - prev_ent)  # estimate entropy difference
         prev_ent = ent
         if entropy_arr[i] <= thresh:
@@ -366,12 +367,33 @@ def _laplacian_hex_impl(
 def _entropy_impl(
     xx: NDArrayA,
 ) -> float:
-    """Get entropy of an array."""
-    xnz = xx[xx > 0]
-    xs = np.sum(xnz)
+    """Get entropy of an array with increased numerical precision."""
+    # Cast input to float64 and filter positive values
+    xx_64 = xx.astype(np.float64)
+    xnz = xx_64[xx_64 > 0]
+
+    # Handle empty array
+    if len(xnz) == 0:
+        return 0.0
+
+    # Use float64 for all calculations
+    eps = np.finfo(np.float64).eps  # ~2.22e-16
+    xs = np.sum(xnz, dtype=np.float64)
+
+    # Avoid division by zero
+    if xs < eps:
+        return 0.0
+
+    # Calculate normalized probabilities
     xn = xnz / xs
-    xl = np.log(xn)
-    return float((-xl * xn).sum())
+
+    # Safe logarithm (avoid log(0))
+    xl = np.log(np.maximum(xn, eps))
+
+    # Calculate entropy
+    entropy = -np.sum(xn * xl, dtype=np.float64)
+
+    return float(entropy)
 
 
 def _compute_idxs(
