@@ -77,6 +77,9 @@ dependencies = [
   "zarr>=3",
 ]
 
+optional-dependencies.torch = [
+  "torch>=2.0.0",
+]
 optional-dependencies.dev = [
   "hatch>=1.9",
   "ipykernel",
