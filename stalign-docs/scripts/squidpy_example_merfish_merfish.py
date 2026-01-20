@@ -73,9 +73,10 @@ def create_adata_from_merfish(df: pd.DataFrame, name: str) -> ad.AnnData:
     # Store spatial coordinates in obsm (squidpy convention)
     adata.obsm['spatial'] = coords
 
-    # Store original metadata
+    # Store original metadata (exclude coordinate columns and index-like columns)
+    skip_cols = {'center_x', 'center_y', 'Unnamed: 0'}
     for col in df.columns:
-        if col not in ['center_x', 'center_y']:
+        if col not in skip_cols:
             adata.obs[col] = df[col].values
 
     return adata
