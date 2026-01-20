@@ -295,13 +295,34 @@ def LDDMM(
         minv, maxv = (minv + maxv) * 0.5 + 0.5 * torch.tensor([-1.0, 1.0], device=device, dtype=dtype)[
             ..., None
         ] * (maxv - minv) * expand
-        xv = [torch.arange(m, M, a * 0.5, device=device, dtype=dtype) for m, M in zip(minv, maxv)]
+
+        # Compute step size, ensuring at least 2 grid points per dimension
+        step = a * 0.5
+        image_extent = maxv - minv
+        # If step is too large, reduce it to ensure minimum grid size
+        for i in range(len(minv)):
+            extent_i = (image_extent[i]).item()
+            if extent_i > 0 and extent_i / step < 2:
+                step = min(step, extent_i / 3)  # Ensure at least 3 points
+
+        xv = [torch.arange(m, M, step, device=device, dtype=dtype) for m, M in zip(minv, maxv)]
+
+        # Ensure at least 2 points in each dimension
+        for i in range(len(xv)):
+            if len(xv[i]) < 2:
+                xv[i] = torch.linspace(minv[i].item(), maxv[i].item(), 3, device=device, dtype=dtype)
+
         XV = torch.stack(torch.meshgrid(xv, indexing="ij"), -1)
         v = torch.zeros((nt, XV.shape[0], XV.shape[1], XV.shape[2]), device=device, dtype=dtype, requires_grad=True)
     else:
         raise ValueError("Must provide both xv and v, or neither")
 
-    dv = torch.as_tensor([x[1] - x[0] for x in xv], device=device, dtype=dtype)
+    # Compute grid spacing - handle edge case of 1-element grids
+    dv = torch.as_tensor(
+        [x[1] - x[0] if len(x) > 1 else torch.tensor(1.0, device=device, dtype=dtype) for x in xv],
+        device=device,
+        dtype=dtype,
+    )
 
     # Build smoothing kernel in frequency domain
     fv = [torch.arange(n, device=device, dtype=dtype) / n / d for n, d in zip(XV.shape, dv)]
