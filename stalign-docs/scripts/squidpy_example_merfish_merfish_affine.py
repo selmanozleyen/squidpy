@@ -101,17 +101,19 @@ if HAS_SPATIALDATA:
     sdata_target = sd.SpatialData(points={"cells": target_points})
 
 # =============================================================================
-# Run AFFINE-ONLY alignment
+# Run AFFINE-ONLY alignment (using unified align API)
 # =============================================================================
 
 print("\nRunning affine-only alignment...")
 print("This is faster than full LDDMM and suitable for global transformations")
 
-# Method 1: Use align_spatial with method='affine'
-sq.experimental.align_spatial(
+# Use the unified align() with method='affine'
+# The function auto-detects that both inputs are AnnData objects
+# and performs coordinate-to-coordinate alignment
+sq.experimental.align(
     adata_source,
     adata_target,
-    spatial_key='spatial',
+    source_key='spatial',
     key_added='spatial_aligned',
     # Rasterization parameters
     resolution=15.0,  # Can use finer resolution for affine
@@ -125,6 +127,8 @@ sq.experimental.align_spatial(
     copy=False,
     verbose=True,
 )
+
+# Note: sq.experimental.align_spatial(..., method='affine') also works
 
 print("\nAffine alignment complete!")
 

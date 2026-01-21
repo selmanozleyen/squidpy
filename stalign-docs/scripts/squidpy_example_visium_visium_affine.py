@@ -165,18 +165,20 @@ plt.close()
 print(f"Figure saved to {output_fig}")
 
 # =============================================================================
-# Run affine-only alignment
+# Run affine-only alignment (using unified align API)
 # =============================================================================
 
 print("\nRunning affine-only alignment...")
 print("Visium spots are already well-registered, affine is sufficient")
 
+# The unified align() function auto-detects both inputs as AnnData
+# and performs coordinate-to-coordinate alignment
 # For Visium data with relatively uniform spot patterns,
 # we use finer rasterization and affine-only method
-sq.experimental.align_spatial(
+sq.experimental.align(
     adata_source,
     adata_target,
-    spatial_key='spatial',
+    source_key='spatial',
     key_added='spatial_aligned',
     # Rasterization - use dx=1 for spot data
     resolution=1.0,
@@ -192,6 +194,8 @@ sq.experimental.align_spatial(
     copy=False,
     verbose=True,
 )
+
+# Note: sq.experimental.align_spatial(..., method='affine') also works
 
 print("\nAlignment complete!")
 

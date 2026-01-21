@@ -134,17 +134,15 @@ landmark_target = pointsJ[:, ::-1]
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
 # Rasterize source for visualization
-source_img, extent = sq.experimental.rasterize_coordinates(
-    adata_source,
+X, Y, source_img = sq.experimental.rasterize_coordinates(
+    adata_source.obsm['spatial'],
     resolution=30.0,
-    return_extent=True,
     blur=1.0
 )
 
-axes[0].imshow(source_img, extent=extent, cmap='viridis')
+axes[0].imshow(source_img[0], extent=[X.min(), X.max(), Y.max(), Y.min()], cmap='viridis')
 axes[0].scatter(landmark_source[:, 0], landmark_source[:, 1], c='red', s=50, marker='x')
 axes[0].set_title('Source: MERFISH (rasterized)')
-axes[0].invert_yaxis()
 
 axes[1].imshow(V)
 axes[1].scatter(landmark_target[:, 0], landmark_target[:, 1], c='red', s=50, marker='x')
@@ -162,17 +160,20 @@ plt.close()
 print(f"Figure saved to {output_fig}")
 
 # =============================================================================
-# Run coordinate-to-image alignment
+# Run coordinate-to-image alignment (using unified align API)
 # =============================================================================
 
 print("\nRunning coordinate-to-image alignment...")
 print("This aligns MERFISH cell coordinates to the Visium H&E image space")
 
-# Use align_to_image for coordinate-to-image alignment
-sq.experimental.align_to_image(
+# The unified align() function auto-detects:
+# - Source: AnnData (coordinates)
+# - Target: numpy array (image)
+# And automatically uses coordinate-to-image alignment
+sq.experimental.align(
     adata_source,
-    target_image=V,
-    spatial_key='spatial',
+    V,  # Target image (numpy array)
+    source_key='spatial',
     key_added='spatial_aligned',
     # Rasterization parameters for source
     resolution=30.0,
@@ -187,6 +188,8 @@ sq.experimental.align_to_image(
     # Other options
     verbose=True,
 )
+
+# Note: sq.experimental.align_to_image() also works for explicit usage
 
 print("\nAlignment complete!")
 

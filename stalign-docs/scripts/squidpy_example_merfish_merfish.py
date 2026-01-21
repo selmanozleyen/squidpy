@@ -165,22 +165,27 @@ plt.close()
 print(f"Figure saved to {output_fig}")
 
 # =============================================================================
-# Run alignment with Squidpy
+# Run alignment with Squidpy (using unified align API)
 # =============================================================================
 
 print("\nRunning LDDMM alignment...")
 print("This uses rasterization at 30µm resolution and full diffeomorphic registration")
 
-# The align_spatial function handles:
+# The unified sq.experimental.align() function auto-detects input types:
+# - AnnData → AnnData: coordinate-to-coordinate alignment (like align_spatial)
+# - AnnData → Image: coordinate-to-image alignment (like align_to_image)
+# - Image → Image: image-to-image alignment (like align_images)
+#
+# It handles:
 # 1. Rasterization of point clouds to images
 # 2. Initial affine alignment (with optional rotation hint)
 # 3. LDDMM diffeomorphic registration
 # 4. Storing results back in adata_source
 
-sq.experimental.align_spatial(
+sq.experimental.align(
     adata_source,
     adata_target,
-    spatial_key='spatial',
+    source_key='spatial',
     key_added='spatial_aligned',
     # Rasterization parameters
     resolution=30.0,  # 30µm resolution
@@ -195,6 +200,9 @@ sq.experimental.align_spatial(
     copy=False,       # Modify adata_source in place
     verbose=True,     # Show progress
 )
+
+# Note: You can also use the explicit sq.experimental.align_spatial() function
+# for the same result. The unified align() is recommended for new code.
 
 print("\nAlignment complete!")
 print(f"Aligned coordinates stored in adata_source.obsm['spatial_aligned']")
