@@ -2,6 +2,44 @@
 
 This module provides the main entry points for aligning spatial transcriptomics
 data using LDDMM (Large Deformation Diffeomorphic Metric Mapping).
+
+.. note:: Future SpatialData Integration Considerations
+
+    This module currently uses a custom rasterization function
+    (:func:`squidpy.experimental._lddmm.rasterize`) that creates **Gaussian kernel
+    density images** from point coordinates. This is different from
+    ``spatialdata.rasterize()`` which produces discrete count/value images.
+
+    The Gaussian blur is essential for LDDMM optimization because:
+
+    1. It creates smooth gradients that the optimizer can follow
+    2. Without smoothing, the optimization would fail or produce poor results
+    3. The blur acts as a regularizer for the density estimation
+
+    To migrate to native SpatialData formats in the future, we would need to:
+
+    1. **For coordinate extraction**: Use ``spatialdata.get_centroids()`` to get
+       coordinates from shapes/labels, or extract from points elements directly.
+
+    2. **For rasterization**: Either:
+
+       - Keep the custom Gaussian kernel rasterization (recommended for alignment)
+       - Use ``spatialdata.rasterize()`` + post-hoc Gaussian blur via scipy/skimage,
+         but this would be less efficient and may not produce identical results.
+
+    3. **For transformations**: Store alignment results as ``spatialdata.transformations``
+       Affine objects when only affine alignment is used. For LDDMM (non-linear),
+       the velocity field cannot be represented as a spatialdata transformation,
+       so we'd need to store it separately or apply it to create new elements.
+
+    4. **For images**: Use ``sdata.images[key]`` with proper coordinate system
+       handling via ``spatialdata.transformations``.
+
+    See Also
+    --------
+    spatialdata.rasterize : Discrete rasterization (counts, not density)
+    spatialdata.transformations : Coordinate system transformations
+    spatialdata.get_centroids : Extract centroids from spatial elements
 """
 
 from __future__ import annotations
@@ -15,6 +53,58 @@ if TYPE_CHECKING:
     import spatialdata as sd
     from anndata import AnnData
     from numpy.typing import NDArray
+
+# =============================================================================
+# Input type detection
+# =============================================================================
+
+# Type alias for alignment inputs
+AlignmentInput = "AnnData | sd.SpatialData | NDArray[np.floating]"
+
+
+def _detect_input_type(
+    data: Any,
+) -> Literal["anndata", "spatialdata", "image", "coords"]:
+    """Detect the type of alignment input.
+
+    Returns
+    -------
+    One of: 'anndata', 'spatialdata', 'image', 'coords'
+    """
+    # Check for AnnData
+    if hasattr(data, "obsm") and hasattr(data, "obs"):
+        return "anndata"
+
+    # Check for SpatialData (lazy import to avoid circular)
+    try:
+        import spatialdata as sd
+
+        if isinstance(data, sd.SpatialData):
+            return "spatialdata"
+    except ImportError:
+        pass
+
+    # Check for numpy array
+    if isinstance(data, np.ndarray):
+        if data.ndim == 2 and data.shape[1] == 2:
+            return "coords"
+        return "image"
+
+    # Try to convert to array and check
+    try:
+        arr = np.asarray(data)
+        if arr.ndim == 2 and arr.shape[1] == 2:
+            return "coords"
+        return "image"
+    except (ValueError, TypeError):
+        pass
+
+    raise TypeError(f"Cannot determine input type for {type(data)}")
+
+
+# =============================================================================
+# PyTorch utilities
+# =============================================================================
 
 
 def _check_torch() -> None:
@@ -33,6 +123,602 @@ def _get_torch():
     import torch
 
     return torch
+
+
+# =============================================================================
+# Image normalization utilities
+# =============================================================================
+
+
+def _normalize_image_to_chw(
+    image: "NDArray[np.floating]",
+) -> tuple["NDArray[np.floating]", bool, int]:
+    """Normalize image array to (C, H, W) format.
+
+    Parameters
+    ----------
+    image
+        Image array with shape (H, W) or (H, W, C) or (C, H, W).
+
+    Returns
+    -------
+    Tuple of (normalized image, was_hwc_format, original_ndim)
+    """
+    image = np.asarray(image)
+    original_ndim = image.ndim
+    hwc_format = False
+
+    if image.ndim == 2:
+        image = image[np.newaxis, :, :]
+    elif image.ndim == 3 and image.shape[-1] <= 4 and image.shape[0] > 4:
+        # Likely (H, W, C) format
+        hwc_format = True
+        image = np.moveaxis(image, -1, 0)
+
+    return image, hwc_format, original_ndim
+
+
+def _ensure_3_channels(image: "NDArray[np.floating]") -> "NDArray[np.floating]":
+    """Ensure image has 3 channels for LDDMM."""
+    if image.shape[0] == 1:
+        return np.vstack([image] * 3)
+    elif image.shape[0] == 4:
+        return image[:3]  # Drop alpha channel
+    return image
+
+
+def _normalize_image_range(image: "NDArray[np.floating]") -> "NDArray[np.floating]":
+    """Normalize image to [0, 1] range."""
+    return (image - image.min()) / (image.max() - image.min() + 1e-8)
+
+
+# =============================================================================
+# Coordinate extraction utilities
+# =============================================================================
+
+
+def _extract_coords_from_input(
+    data: Any,
+    spatial_key: str = "spatial",
+    element_key: str | None = None,
+) -> "NDArray[np.floating]":
+    """Extract coordinates from various input types.
+
+    Parameters
+    ----------
+    data
+        AnnData, SpatialData, or coordinate array.
+    spatial_key
+        Key for spatial coordinates in AnnData.obsm.
+    element_key
+        Key for element in SpatialData (points or shapes).
+
+    Returns
+    -------
+    Nx2 array of (x, y) coordinates.
+    """
+    input_type = _detect_input_type(data)
+
+    if input_type == "anndata":
+        if spatial_key not in data.obsm:
+            raise KeyError(
+                f"Spatial key '{spatial_key}' not found in obsm. "
+                f"Available: {list(data.obsm.keys())}"
+            )
+        return np.asarray(data.obsm[spatial_key])
+
+    elif input_type == "spatialdata":
+        import spatialdata as sd
+
+        if element_key is None:
+            # Try to find a suitable element
+            if data.points:
+                element_key = next(iter(data.points.keys()))
+            elif data.shapes:
+                element_key = next(iter(data.shapes.keys()))
+            else:
+                raise ValueError("SpatialData has no points or shapes elements")
+
+        # Extract coordinates using spatialdata utilities
+        if element_key in data.points:
+            points_df = data.points[element_key].compute()
+            return np.column_stack([points_df["x"].values, points_df["y"].values])
+        elif element_key in data.shapes:
+            # Use centroids for shapes
+            centroids = sd.get_centroids(data.shapes[element_key])
+            return np.column_stack([centroids["x"].values, centroids["y"].values])
+        else:
+            raise KeyError(f"Element '{element_key}' not found in SpatialData")
+
+    elif input_type == "coords":
+        return np.asarray(data)
+
+    else:
+        raise TypeError(f"Cannot extract coordinates from {type(data)}")
+
+
+# =============================================================================
+# Unified align() API
+# =============================================================================
+
+
+def align(
+    source: AlignmentInput,
+    target: AlignmentInput,
+    *,
+    source_key: str | None = None,
+    target_key: str | None = None,
+    method: Literal["affine", "lddmm"] = "lddmm",
+    # Rasterization parameters (for coordinate inputs)
+    resolution: float = 30.0,
+    blur: float = 1.5,
+    # LDDMM parameters
+    niter: int = 2000,
+    diffeo_start: int = 100,
+    a: float = 500.0,
+    p: float = 2.0,
+    sigmaM: float = 1.0,
+    sigmaR: float = 5e5,
+    # Initial transform
+    initial_rotation_deg: float = 0.0,
+    landmark_points_source: "NDArray[np.floating] | None" = None,
+    landmark_points_target: "NDArray[np.floating] | None" = None,
+    # Computation
+    device: str = "cpu",
+    verbose: bool = True,
+    # Output (for AnnData inputs)
+    key_added: str = "spatial_aligned",
+    copy: bool = False,
+) -> "dict[str, Any] | AnnData | None":
+    """Unified alignment function that auto-detects input types.
+
+    This is the recommended entry point for spatial alignment. It automatically
+    detects the input types and dispatches to the appropriate alignment method:
+
+    - **Coordinates → Coordinates**: Aligns two sets of spatial coordinates
+      (e.g., two AnnData objects with spatial data).
+    - **Coordinates → Image**: Aligns coordinates to a reference image
+      (e.g., aligning cell positions to an H&E image).
+    - **Image → Image**: Aligns two images directly
+      (e.g., aligning two histology images).
+
+    Parameters
+    ----------
+    source
+        Source data to align. Can be:
+
+        - :class:`~anndata.AnnData` with coordinates in ``obsm[source_key]``
+        - :class:`~spatialdata.SpatialData` with points/shapes element
+        - :class:`~numpy.ndarray` of coordinates (Nx2) or image (H,W) or (H,W,C)
+
+    target
+        Target data to align to. Same types as source.
+    source_key
+        For AnnData: key in ``obsm`` for coordinates (default: 'spatial').
+        For SpatialData: element key for points/shapes.
+    target_key
+        Same as ``source_key`` but for target data.
+        For SpatialData images: key in ``sdata.images``.
+    method
+        Alignment method: 'lddmm' for full diffeomorphic, 'affine' for
+        affine-only. Default: 'lddmm'.
+    resolution
+        Pixel size for coordinate rasterization. Default: 30.0.
+    blur
+        Gaussian blur sigma for rasterization. Default: 1.5.
+    niter
+        Number of optimization iterations. Default: 2000.
+    diffeo_start
+        Iteration to start nonlinear deformation. Default: 100.
+    a
+        Smoothness scale of velocity field. Default: 500.0.
+    p
+        Power of Laplacian regularization. Default: 2.0.
+    sigmaM
+        Image matching weight. Default: 1.0.
+    sigmaR
+        Regularization weight. Default: 5e5.
+    initial_rotation_deg
+        Initial rotation in degrees. Default: 0.0.
+    landmark_points_source
+        Optional Nx2 landmark points in source (x, y order).
+    landmark_points_target
+        Optional Nx2 landmark points in target (x, y order).
+    device
+        PyTorch device ('cpu' or 'cuda:0'). Default: 'cpu'.
+    verbose
+        Print progress. Default: True.
+    key_added
+        For AnnData source: key for aligned coordinates. Default: 'spatial_aligned'.
+    copy
+        For AnnData source: return copy instead of modifying in place.
+
+    Returns
+    -------
+    Depends on input types:
+
+    - AnnData source → modified AnnData (if copy=True) or None
+    - Image/coords source → transformation dictionary
+
+    Examples
+    --------
+    >>> import squidpy as sq
+    >>> # Align two AnnData objects
+    >>> sq.experimental.align(adata_source, adata_target)
+
+    >>> # Align AnnData to histology image
+    >>> sq.experimental.align(adata, histology_image)
+
+    >>> # Align two images
+    >>> transform = sq.experimental.align(image1, image2)
+
+    See Also
+    --------
+    align_spatial : Explicit coordinate-to-coordinate alignment
+    align_to_image : Explicit coordinate-to-image alignment
+    align_images : Explicit image-to-image alignment
+    """
+    source_type = _detect_input_type(source)
+    target_type = _detect_input_type(target)
+
+    # Set default keys
+    if source_key is None:
+        source_key = "spatial"
+    if target_key is None:
+        target_key = "spatial"
+
+    # Dispatch based on input types
+    if source_type in ("anndata", "spatialdata", "coords"):
+        if target_type in ("anndata", "spatialdata", "coords"):
+            # Coordinate-to-coordinate alignment
+            if source_type == "anndata":
+                return align_spatial(
+                    source,
+                    target if target_type == "anndata" else _coords_to_adata(target, target_key),
+                    spatial_key=source_key,
+                    method=method,
+                    resolution=resolution,
+                    blur=blur,
+                    niter=niter,
+                    diffeo_start=diffeo_start,
+                    a=a,
+                    p=p,
+                    sigmaM=sigmaM,
+                    sigmaR=sigmaR,
+                    initial_rotation_deg=initial_rotation_deg,
+                    landmark_points_source=landmark_points_source,
+                    landmark_points_target=landmark_points_target,
+                    device=device,
+                    verbose=verbose,
+                    key_added=key_added,
+                    copy=copy,
+                )
+            else:
+                # Source is coords or spatialdata - extract and use align_images on rasterized
+                source_coords = _extract_coords_from_input(source, source_key)
+                target_coords = _extract_coords_from_input(target, target_key)
+                return _align_coords_to_coords_raw(
+                    source_coords,
+                    target_coords,
+                    method=method,
+                    resolution=resolution,
+                    blur=blur,
+                    niter=niter,
+                    diffeo_start=diffeo_start,
+                    a=a,
+                    p=p,
+                    sigmaM=sigmaM,
+                    sigmaR=sigmaR,
+                    initial_rotation_deg=initial_rotation_deg,
+                    landmark_points_source=landmark_points_source,
+                    landmark_points_target=landmark_points_target,
+                    device=device,
+                    verbose=verbose,
+                )
+
+        elif target_type == "image":
+            # Coordinate-to-image alignment
+            if source_type == "anndata":
+                return align_to_image(
+                    source,
+                    target,
+                    target_image_key=target_key if target_key != "spatial" else None,
+                    spatial_key=source_key,
+                    method=method,
+                    resolution=resolution,
+                    blur=blur,
+                    niter=niter,
+                    diffeo_start=diffeo_start,
+                    a=a,
+                    p=p,
+                    sigmaM=sigmaM,
+                    sigmaR=sigmaR,
+                    initial_rotation_deg=initial_rotation_deg,
+                    landmark_points_source=landmark_points_source,
+                    landmark_points_target=landmark_points_target,
+                    device=device,
+                    verbose=verbose,
+                    key_added=key_added,
+                    copy=copy,
+                )
+            else:
+                # Source is coords or spatialdata
+                source_coords = _extract_coords_from_input(source, source_key)
+                return _align_coords_to_image_raw(
+                    source_coords,
+                    np.asarray(target),
+                    method=method,
+                    resolution=resolution,
+                    blur=blur,
+                    niter=niter,
+                    diffeo_start=diffeo_start,
+                    a=a,
+                    p=p,
+                    sigmaM=sigmaM,
+                    sigmaR=sigmaR,
+                    initial_rotation_deg=initial_rotation_deg,
+                    landmark_points_source=landmark_points_source,
+                    landmark_points_target=landmark_points_target,
+                    device=device,
+                    verbose=verbose,
+                )
+
+    elif source_type == "image":
+        if target_type == "image":
+            # Image-to-image alignment
+            return align_images(
+                source,
+                target,
+                method=method,
+                niter=niter,
+                diffeo_start=diffeo_start,
+                a=a,
+                p=p,
+                sigmaM=sigmaM,
+                sigmaR=sigmaR,
+                initial_rotation_deg=initial_rotation_deg,
+                landmark_points_source=landmark_points_source,
+                landmark_points_target=landmark_points_target,
+                device=device,
+                verbose=verbose,
+            )
+        else:
+            raise TypeError(
+                f"Cannot align image source to {target_type} target. "
+                "For image-to-coordinates, swap source and target."
+            )
+
+    raise TypeError(f"Unsupported alignment: {source_type} → {target_type}")
+
+
+def _coords_to_adata(
+    coords: "NDArray[np.floating] | Any",
+    spatial_key: str = "spatial",
+) -> "AnnData":
+    """Create a minimal AnnData from coordinates."""
+    from anndata import AnnData
+
+    coords = np.asarray(coords)
+    adata = AnnData(X=np.zeros((len(coords), 1)))
+    adata.obsm[spatial_key] = coords
+    return adata
+
+
+def _align_coords_to_coords_raw(
+    source_coords: "NDArray[np.floating]",
+    target_coords: "NDArray[np.floating]",
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Align raw coordinate arrays and return transformation dict."""
+    from squidpy.experimental._lddmm import (
+        LDDMM,
+        rasterize,
+        transform_points_source_to_target,
+    )
+    from squidpy.experimental._lddmm._transforms import (
+        L_T_from_points,
+        compute_initial_affine,
+    )
+
+    _check_torch()
+
+    # Extract parameters
+    method = kwargs.get("method", "lddmm")
+    resolution = kwargs.get("resolution", 30.0)
+    blur = kwargs.get("blur", 1.5)
+    niter = kwargs.get("niter", 2000)
+    diffeo_start = kwargs.get("diffeo_start", 100)
+    a = kwargs.get("a", 500.0)
+    p = kwargs.get("p", 2.0)
+    sigmaM = kwargs.get("sigmaM", 1.0)
+    sigmaR = kwargs.get("sigmaR", 5e5)
+    initial_rotation_deg = kwargs.get("initial_rotation_deg", 0.0)
+    landmark_points_source = kwargs.get("landmark_points_source")
+    landmark_points_target = kwargs.get("landmark_points_target")
+    device = kwargs.get("device", "cpu")
+    verbose = kwargs.get("verbose", True)
+
+    xI, yI = source_coords[:, 0], source_coords[:, 1]
+    xJ, yJ = target_coords[:, 0], target_coords[:, 1]
+
+    # Initial transform
+    L_init, T_init = None, None
+    if initial_rotation_deg != 0.0:
+        L_init, T_init = compute_initial_affine(xI, yI, xJ, yJ, initial_rotation_deg)
+
+    if landmark_points_source is not None and landmark_points_target is not None:
+        pts_I_rc = np.column_stack([landmark_points_source[:, 1], landmark_points_source[:, 0]])
+        pts_J_rc = np.column_stack([landmark_points_target[:, 1], landmark_points_target[:, 0]])
+        if L_init is None:
+            L_init, T_init = L_T_from_points(pts_I_rc, pts_J_rc)
+
+    # Apply initial transform for rasterization
+    if L_init is not None:
+        coords_I_rc = np.column_stack([yI, xI])
+        coords_I_transformed = (L_init @ coords_I_rc.T).T + T_init
+        yI_t, xI_t = coords_I_transformed[:, 0], coords_I_transformed[:, 1]
+        L_initial, T_initial = L_init, T_init
+        L_init_lddmm, T_init_lddmm = None, None
+    else:
+        xI_t, yI_t = xI, yI
+        L_initial, T_initial = None, None
+        L_init_lddmm, T_init_lddmm = None, None
+
+    # Rasterize
+    XI, YI, I = rasterize(xI_t, yI_t, dx=resolution, blur=blur)
+    XJ, YJ, J = rasterize(xJ, yJ, dx=resolution, blur=blur)
+    I_rgb = np.vstack([I, I, I])
+    J_rgb = np.vstack([J, J, J])
+
+    if method == "affine":
+        diffeo_start = niter + 1
+
+    if verbose:
+        print(f"Source image shape: {I_rgb.shape}")
+        print(f"Target image shape: {J_rgb.shape}")
+
+    # Run LDDMM
+    result = LDDMM(
+        [YI, XI], I_rgb, [YJ, XJ], J_rgb,
+        L=L_init_lddmm, T=T_init_lddmm,
+        niter=niter, diffeo_start=diffeo_start,
+        a=a, p=p, sigmaM=sigmaM, sigmaR=sigmaR,
+        device=device, verbose=verbose,
+    )
+
+    # Transform coordinates
+    points_source_rc = np.column_stack([yI, xI])
+    if L_initial is not None:
+        points_source_rc = (L_initial @ points_source_rc.T).T + T_initial
+
+    points_aligned_rc = transform_points_source_to_target(
+        result["xv"], result["v"], result["A"], points_source_rc
+    )
+    points_aligned_rc = points_aligned_rc.cpu().numpy()
+    aligned_coords = np.column_stack([points_aligned_rc[:, 1], points_aligned_rc[:, 0]])
+
+    return {
+        "A": result["A"].cpu().numpy(),
+        "v": result["v"].cpu().numpy(),
+        "xv": [x.cpu().numpy() for x in result["xv"]],
+        "aligned_coords": aligned_coords,
+        "source_coords": source_coords,
+        "method": method,
+        "resolution": resolution,
+        "blur": blur,
+        "loss_history": result["Esave"],
+    }
+
+
+def _align_coords_to_image_raw(
+    source_coords: "NDArray[np.floating]",
+    target_image: "NDArray[np.floating]",
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Align raw coordinates to image and return transformation dict."""
+    from squidpy.experimental._lddmm import (
+        LDDMM,
+        rasterize,
+        transform_points_source_to_target,
+    )
+    from squidpy.experimental._lddmm._transforms import (
+        L_T_from_points,
+        compute_initial_affine,
+    )
+
+    _check_torch()
+
+    # Extract parameters
+    method = kwargs.get("method", "lddmm")
+    resolution = kwargs.get("resolution", 30.0)
+    blur = kwargs.get("blur", 1.5)
+    niter = kwargs.get("niter", 2000)
+    diffeo_start = kwargs.get("diffeo_start", 100)
+    a = kwargs.get("a", 500.0)
+    p = kwargs.get("p", 2.0)
+    sigmaM = kwargs.get("sigmaM", 1.0)
+    sigmaR = kwargs.get("sigmaR", 5e5)
+    initial_rotation_deg = kwargs.get("initial_rotation_deg", 0.0)
+    landmark_points_source = kwargs.get("landmark_points_source")
+    landmark_points_target = kwargs.get("landmark_points_target")
+    device = kwargs.get("device", "cpu")
+    verbose = kwargs.get("verbose", True)
+
+    # Normalize target image
+    J, _, _ = _normalize_image_to_chw(target_image)
+    J = _ensure_3_channels(J)
+    J = _normalize_image_range(J)
+
+    _, h_J, w_J = J.shape
+    XJ = np.arange(w_J, dtype=np.float64)
+    YJ = np.arange(h_J, dtype=np.float64)
+
+    xI, yI = source_coords[:, 0], source_coords[:, 1]
+
+    # Initial transform
+    L_init, T_init = None, None
+    if initial_rotation_deg != 0.0:
+        L_init, T_init = compute_initial_affine(xI, yI, XJ, YJ, initial_rotation_deg)
+
+    if landmark_points_source is not None and landmark_points_target is not None:
+        pts_I_rc = np.column_stack([landmark_points_source[:, 1], landmark_points_source[:, 0]])
+        pts_J_rc = np.column_stack([landmark_points_target[:, 1], landmark_points_target[:, 0]])
+        if L_init is None:
+            L_init, T_init = L_T_from_points(pts_I_rc, pts_J_rc)
+
+    # Apply initial transform for rasterization
+    if L_init is not None:
+        coords_I_rc = np.column_stack([yI, xI])
+        coords_I_transformed = (L_init @ coords_I_rc.T).T + T_init
+        yI_t, xI_t = coords_I_transformed[:, 0], coords_I_transformed[:, 1]
+    else:
+        xI_t, yI_t = xI, yI
+
+    # Rasterize source
+    XI, YI, I = rasterize(xI_t, yI_t, dx=resolution, blur=blur)
+    I_rgb = np.vstack([I, I, I])
+
+    if method == "affine":
+        diffeo_start = niter + 1
+
+    if verbose:
+        print(f"Source (rasterized) image shape: {I_rgb.shape}")
+        print(f"Target image shape: {J.shape}")
+
+    # Run LDDMM
+    result = LDDMM(
+        [YI, XI], I_rgb, [YJ, XJ], J,
+        L=L_init, T=T_init,
+        niter=niter, diffeo_start=diffeo_start,
+        a=a, p=p, sigmaM=sigmaM, sigmaR=sigmaR,
+        device=device, verbose=verbose,
+    )
+
+    # Transform coordinates
+    points_source_rc = np.column_stack([yI, xI])
+    points_aligned_rc = transform_points_source_to_target(
+        result["xv"], result["v"], result["A"], points_source_rc
+    )
+    points_aligned_rc = points_aligned_rc.cpu().numpy()
+    aligned_coords = np.column_stack([points_aligned_rc[:, 1], points_aligned_rc[:, 0]])
+
+    return {
+        "A": result["A"].cpu().numpy(),
+        "v": result["v"].cpu().numpy(),
+        "xv": [x.cpu().numpy() for x in result["xv"]],
+        "aligned_coords": aligned_coords,
+        "source_coords": source_coords,
+        "target_image_shape": J.shape,
+        "method": method,
+        "resolution": resolution,
+        "blur": blur,
+        "loss_history": result["Esave"],
+    }
+
+
+# =============================================================================
+# Public API functions
+# =============================================================================
 
 
 def rasterize_coordinates(
