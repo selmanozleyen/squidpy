@@ -7,9 +7,7 @@ These features may change or be removed in future releases.
 from __future__ import annotations
 
 from squidpy.experimental._align import (
-    align,
     align_images,
-    align_images_sdata,
     align_spatial,
     align_to_image,
     apply_transform,
@@ -17,18 +15,16 @@ from squidpy.experimental._align import (
     transform_image,
 )
 
-from . import im, pl
+from . import im, pl, tl
 
 __all__ = [
     "im",
     "pl",
-    # Unified API (recommended)
-    "align",
-    # Specific alignment functions
+    "tl",
+    # Specific alignment functions (legacy)
     "align_spatial",
     "align_to_image",
     "align_images",
-    "align_images_sdata",
     # Utilities
     "rasterize_coordinates",
     "apply_transform",
