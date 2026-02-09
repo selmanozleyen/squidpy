@@ -147,3 +147,5 @@ pixi.lock
 stalign-docs/*.rst
 stalign-docs/notebooks/*.ipynb
 stalign-docs/*.txt
+
+_version.py
