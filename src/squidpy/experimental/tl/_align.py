@@ -23,6 +23,7 @@ import warnings
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
+import pandas as pd
 
 if TYPE_CHECKING:
     from anndata import AnnData
@@ -152,15 +153,28 @@ def _align_points_moscot(
     adata_target: "AnnData",
     *,
     spatial_key: str = "spatial",
-    batch_key: str = "_align_batch",
-    joint_attr: str | dict[str, Any] | None = None,
-    GW_kwargs: dict[str, Any] | None = None,
     key_added: str = "spatial_aligned",
     copy: bool = False,
     verbose: bool = True,
-    **kwargs: Any,
+    prepare_kwargs: dict[str, Any] | None = None,
+    solve_kwargs: dict[str, Any] | None = None,
+    align_kwargs: dict[str, Any] | None = None,
 ) -> "AnnData | None":
-    """Align two point clouds via :class:`moscot.problems.space.AlignmentProblem`.
+    """Align two point clouds via :class:`moscot.problems.generic.SinkhornProblem`.
+
+    Solves a **linear** optimal-transport problem (Sinkhorn) using spatial
+    coordinates as the cost (``joint_attr``).  Because source and target
+    live in the same coordinate space the linear cost directly measures
+    how far each source point is from each target point — no
+    Gromov-Wasserstein comparison of distance structures is needed.
+
+    After solving, aligned coordinates are computed from the transport
+    plan:
+
+    * **warp** — each source cell is mapped to the weighted average of
+      target positions: ``T_norm @ target_coords``.
+    * **affine** — a rigid (rotation + translation) transformation is
+      estimated from the transport plan via SVD.
 
     Parameters
     ----------
@@ -168,21 +182,22 @@ def _align_points_moscot(
         AnnData objects with spatial coordinates in ``obsm[spatial_key]``.
     spatial_key
         Key in ``obsm`` for spatial coordinates.
-    batch_key
-        Temporary obs column used to distinguish source/target after concat.
-    joint_attr
-        Joint attribute for moscot.  ``None`` → spatial-only,
-        ``"X_pca"`` → gene-expression guided.
-    GW_kwargs
-        Extra keyword arguments forwarded to ``AlignmentProblem.solve()``.
     key_added
         obsm key where aligned coordinates are stored.
     copy
         Return a modified copy instead of modifying *adata_source* in place.
     verbose
         Print progress.
-    **kwargs
-        Forwarded to ``AlignmentProblem.prepare()``.
+    prepare_kwargs
+        Keyword arguments forwarded to ``SinkhornProblem.prepare()``.
+        Useful keys: ``cost``, ``a``, ``b``.
+    solve_kwargs
+        Keyword arguments forwarded to ``SinkhornProblem.solve()``.
+        Useful keys: ``epsilon``, ``tau_a``, ``tau_b``,
+        ``max_iterations``, ``threshold``.
+    align_kwargs
+        Extra options for the alignment step.
+        Useful keys: ``mode`` (``'warp'`` | ``'affine'``, default ``'warp'``).
 
     Returns
     -------
@@ -190,52 +205,86 @@ def _align_points_moscot(
     """
     _check_moscot()
     import anndata as ad
-    from moscot.problems.space import AlignmentProblem
+    from moscot.problems.generic import SinkhornProblem
 
+    prepare_kw: dict[str, Any] = dict(prepare_kwargs or {})
+    solve_kw: dict[str, Any] = dict(solve_kwargs or {})
+    align_kw: dict[str, Any] = dict(align_kwargs or {})
+
+    batch_key = "_align_batch"
     src_label, tgt_label = "source", "target"
 
-    adata_src = adata_source.copy()
-    adata_tgt = adata_target.copy()
-    adata_src.obs[batch_key] = src_label
-    adata_tgt.obs[batch_key] = tgt_label
+    # Build a lightweight combined AnnData with spatial coordinates only.
+    n_src = adata_source.n_obs
+    n_tgt = adata_target.n_obs
 
-    adata_combined = ad.concat(
-        [adata_src, adata_tgt],
-        label=batch_key,
-        keys=[src_label, tgt_label],
+    obs_src = adata_source.obs.copy()
+    obs_tgt = adata_target.obs.copy()
+    obs_src[batch_key] = src_label
+    obs_tgt[batch_key] = tgt_label
+    obs_combined = pd.concat([obs_src, obs_tgt], ignore_index=True)
+    obs_combined[batch_key] = obs_combined[batch_key].astype("category")
+
+    coords_src = np.asarray(adata_source.obsm[spatial_key])
+    coords_tgt = np.asarray(adata_target.obsm[spatial_key])
+
+    adata_combined = ad.AnnData(
+        X=np.zeros((n_src + n_tgt, 1)),
+        obs=obs_combined,
     )
-    adata_combined.obs[batch_key] = adata_combined.obs[batch_key].astype("category")
+    adata_combined.obsm[spatial_key] = np.vstack([coords_src, coords_tgt])
 
     if verbose:
-        n_src, n_tgt = adata_src.n_obs, adata_tgt.n_obs
         print(
-            f"[moscot] Combined AnnData: {adata_combined.n_obs} cells "
+            f"[moscot] Combined AnnData: {n_src + n_tgt} cells "
             f"({n_src} source + {n_tgt} target)"
         )
 
-    # Prepare ---
-    if joint_attr is None:
-        joint_attr = {"attr": "obsm", "key": spatial_key}
-
-    prepare_kw: dict[str, Any] = dict(batch_key=batch_key, joint_attr=joint_attr, **kwargs)
-    ap = AlignmentProblem(adata_combined)
-    ap = ap.prepare(**prepare_kw)
+    # Prepare --- linear OT with spatial coords as the cost term.
+    prepare_kw.setdefault("joint_attr", {"attr": "obsm", "key": spatial_key})
+    prepare_kw.setdefault("policy", "star")
+    prepare_kw.setdefault("reference", tgt_label)
+    sp = SinkhornProblem(adata_combined)
+    sp = sp.prepare(key=batch_key, **prepare_kw)
 
     # Solve ---
-    solve_kw = dict(GW_kwargs or {})
     solve_kw.setdefault("max_iterations", 100)
     if verbose:
-        print("[moscot] Solving optimal-transport alignment ...")
-    ap = ap.solve(**solve_kw)
+        print("[moscot] Solving linear optimal-transport (Sinkhorn) ...")
+    sp = sp.solve(**solve_kw)
 
-    # Align ---
+    # Compute aligned coordinates from the transport plan ----
+    mode = align_kw.pop("mode", "warp")
     if verbose:
-        print(f"[moscot] Projecting source onto target reference ...")
-    ap.align(reference=tgt_label, key_added=key_added)
+        print(f"[moscot] Computing aligned coordinates (mode={mode!r}) ...")
 
-    # Extract aligned coordinates for source cells
-    source_mask = adata_combined.obs[batch_key] == src_label
-    aligned_coords = np.asarray(adata_combined[source_mask].obsm[key_added])
+    # Transport matrix: shape (n_src, n_tgt)
+    solution = sp.solutions[(src_label, tgt_label)]
+    tmap = solution.transport_matrix
+    if not isinstance(tmap, np.ndarray):
+        tmap = np.asarray(tmap)
+
+    # Normalise rows so each source cell gets a proper weighted average.
+    row_sums = tmap.sum(axis=1, keepdims=True)
+    row_sums = np.where(row_sums == 0, 1.0, row_sums)  # avoid division by zero
+    tmap_norm = tmap / row_sums
+
+    if mode == "warp":
+        # Each source cell → weighted average of target positions.
+        aligned_coords = tmap_norm @ coords_tgt
+    elif mode == "affine":
+        # Rigid (rotation + translation) estimated from the transport plan.
+        from scipy.linalg import svd as _svd
+
+        tgt_centered = coords_tgt - coords_tgt.mean(axis=0)
+        out = tmap_norm @ tgt_centered  # projected source in centred-target space
+        src_centered = coords_src - coords_src.mean(axis=0)
+        H = src_centered.T @ out
+        U, _, Vt = _svd(H)
+        R = Vt.T @ U.T
+        aligned_coords = (R @ src_centered.T).T + coords_tgt.mean(axis=0)
+    else:
+        raise ValueError(f"Unsupported alignment mode {mode!r}. Use 'warp' or 'affine'.")
 
     # Store ---
     adata = adata_source.copy() if copy else adata_source
@@ -244,6 +293,7 @@ def _align_points_moscot(
         "method": "optimal_transport",
         "backend": "moscot",
         "spatial_key": spatial_key,
+        "mode": mode,
     }
 
     if verbose:
@@ -776,35 +826,27 @@ def align(
     verbose: bool = True,
     key_added: str = "spatial_aligned",
     copy: bool = False,
-    # STalign / LDDMM -------------------------------------------------------
-    resolution: float = 30.0,
-    blur: float = 1.5,
-    niter: int = 2000,
-    diffeo_start: int = 100,
-    a: float = 500.0,
-    p: float = 2.0,
-    sigmaM: float = 1.0,
-    sigmaR: float = 5e5,
-    initial_rotation_deg: float = 0.0,
-    landmark_source: "NDArray[np.floating] | None" = None,
-    landmark_target: "NDArray[np.floating] | None" = None,
-    # moscot -----------------------------------------------------------------
-    joint_attr: str | dict[str, Any] | None = None,
-    **kwargs: Any,
+    # Backend-specific -------------------------------------------------------
+    moscot_kwargs: dict[str, Any] | None = None,
+    stalign_kwargs: dict[str, Any] | None = None,
+    # SpatialData ------------------------------------------------------------
+    source_image_key: str | None = None,
+    target_image_key: str | None = None,
+    scale: str | Literal["auto"] = "auto",
 ) -> "AnnData | dict[str, Any] | None":
     """Align spatial transcriptomics data.
 
     Automatically dispatches to the right backend depending on what
     *source* and *target* are:
 
-    ==============================  ================  ====================
-    Source → Target                 Backend           Extra dependency
-    ==============================  ================  ====================
-    AnnData → AnnData (points)      moscot (OT)       ``pip install moscot``
-    AnnData → image                 STalign (LDDMM)   ``pip install torch``
-    image   → image                 STalign (LDDMM)   ``pip install torch``
-    SpatialData (image keys)        STalign (LDDMM)   ``pip install torch``
-    ==============================  ================  ====================
+    ==============================  ==================  ====================
+    Source → Target                 Backend             Extra dependency
+    ==============================  ==================  ====================
+    AnnData → AnnData (points)      moscot (Sinkhorn)   ``pip install moscot``
+    AnnData → image                 STalign (LDDMM)     ``pip install torch``
+    image   → image                 STalign (LDDMM)     ``pip install torch``
+    SpatialData (image keys)        STalign (LDDMM)     ``pip install torch``
+    ==============================  ==================  ====================
 
     Parameters
     ----------
@@ -828,21 +870,36 @@ def align(
         ``obsm`` key for aligned coordinates (AnnData inputs).
     copy
         Return a modified copy of AnnData instead of in-place.
-    resolution
-        Pixel size for rasterising coordinates (STalign).
-    blur
-        Gaussian σ for rasterisation (STalign).
-    niter / diffeo_start / a / p / sigmaM / sigmaR
-        LDDMM hyper-parameters (STalign).
-    initial_rotation_deg
-        Initial clockwise rotation in degrees (STalign).
-    landmark_source / landmark_target
-        N×2 landmark arrays in ``(x, y)`` order (STalign).
-    joint_attr
-        Joint attribute for moscot (``None`` → spatial-only,
-        ``"X_pca"`` → gene-expression guided).
-    **kwargs
-        Forwarded to the backend.
+    moscot_kwargs
+        Backend-specific options for moscot (linear OT / Sinkhorn), with
+        nested keys:
+
+        - ``'prepare_kwargs'`` → forwarded to ``SinkhornProblem.prepare()``.
+          Useful keys: ``cost``, ``a``, ``b``.
+        - ``'solve_kwargs'`` → forwarded to ``SinkhornProblem.solve()``.
+          Useful keys: ``epsilon``, ``tau_a``, ``tau_b``,
+          ``max_iterations``, ``threshold``.
+        - ``'align_kwargs'`` → extra alignment options.
+          Useful keys: ``mode`` (``'warp'`` or ``'affine'``).
+    stalign_kwargs
+        Backend-specific options for STalign/LDDMM:
+
+        - ``resolution`` — pixel size for rasterising coordinates (default 30).
+        - ``blur`` — Gaussian σ for rasterisation (default 1.5).
+        - ``niter`` — number of iterations (default 2000).
+        - ``diffeo_start`` — iteration to start diffeomorphism (default 100).
+        - ``a`` — smoothness lengthscale (default 500).
+        - ``p`` — smoothness exponent (default 2).
+        - ``sigmaM`` — matching weight (default 1).
+        - ``sigmaR`` — regularisation weight (default 5e5).
+        - ``initial_rotation_deg`` — initial rotation in degrees (default 0).
+        - ``landmark_source`` / ``landmark_target`` — N×2 arrays ``(x, y)``.
+    source_image_key
+        Image key in SpatialData for the source.
+    target_image_key
+        Image key in SpatialData for the target.
+    scale
+        Scale level for SpatialData images (default ``"auto"``).
 
     Returns
     -------
@@ -851,16 +908,33 @@ def align(
 
     Examples
     --------
-    **Point-to-point** via moscot:
+    **Point-to-point** via moscot (warp mode):
 
     >>> import squidpy as sq
-    >>> sq.experimental.tl.align(adata_src, adata_tgt)              # auto → moscot
-    >>> sq.experimental.tl.align(adata_src, adata_tgt, method="optimal_transport")
+    >>> sq.experimental.tl.align(adata_src, adata_tgt)
+
+    **Point-to-point** via moscot with custom params:
+
+    >>> sq.experimental.tl.align(
+    ...     adata_src, adata_tgt,
+    ...     method="optimal_transport",
+    ...     moscot_kwargs={
+    ...         'solve_kwargs': {'alpha': 0.5, 'epsilon': 1e-2},
+    ...         'align_kwargs': {'mode': 'affine'},
+    ...     },
+    ... )
+
+    **Point-to-point** via STalign (rasterise + LDDMM):
+
+    >>> sq.experimental.tl.align(
+    ...     adata_src, adata_tgt,
+    ...     method="lddmm",
+    ...     stalign_kwargs={'niter': 3000, 'a': 200},
+    ... )
 
     **Point-to-image** via STalign:
 
     >>> sq.experimental.tl.align(adata, histology_image)
-    >>> aligned = adata.obsm["spatial_aligned"]
 
     **Image-to-image** via STalign:
 
@@ -879,28 +953,24 @@ def align(
     .. [2] Klein *et al.*, "moscot: Multi-omic single-cell optimal
        transport tools" (2023).
     """
+    moscot_kw: dict[str, Any] = dict(moscot_kwargs or {})
+    stalign_kw: dict[str, Any] = dict(stalign_kwargs or {})
+
+    # Inject top-level common params into stalign_kw (all stalign funcs
+    # accept these).  User overrides in stalign_kwargs take precedence.
+    stalign_kw.setdefault("device", device)
+    stalign_kw.setdefault("verbose", verbose)
+
     src_type = _detect_input_type(source)
     tgt_type = _detect_input_type(target)
 
-    # ----- SpatialData shortcut (image keys in kwargs) ---------------------
+    # ----- SpatialData shortcut (image keys) -------------------------------
     if src_type == "spatialdata":
-        source_key = kwargs.pop("source_image_key", None)
-        target_key = kwargs.pop("target_image_key", None)
-        if source_key and target_key:
-            scale = kwargs.pop("scale", "auto")
-            src_img = _extract_image_from_sdata(source, source_key, scale)
-            tgt_img = _extract_image_from_sdata(source, target_key, scale)
-            return _align_images_stalign(
-                src_img, tgt_img,
-                method=method or "lddmm",
-                niter=niter, diffeo_start=diffeo_start,
-                a=a, p=p, sigmaM=sigmaM, sigmaR=sigmaR,
-                initial_rotation_deg=initial_rotation_deg,
-                landmark_source=landmark_source,
-                landmark_target=landmark_target,
-                device=device, verbose=verbose,
-                **kwargs,
-            )
+        if source_image_key and target_image_key:
+            src_img = _extract_image_from_sdata(source, source_image_key, scale)
+            tgt_img = _extract_image_from_sdata(source, target_image_key, scale)
+            stalign_kw.setdefault("method", method or "lddmm")
+            return _align_images_stalign(src_img, tgt_img, **stalign_kw)
 
     # ----- Point-to-point -------------------------------------------------
     if src_type in ("anndata", "coords") and tgt_type in ("anndata", "coords"):
@@ -930,64 +1000,36 @@ def align(
             return _align_points_moscot(
                 source, target,
                 spatial_key=spatial_key,
-                joint_attr=joint_attr,
                 key_added=key_added,
                 copy=copy,
                 verbose=verbose,
-                **kwargs,
+                prepare_kwargs=moscot_kw.get("prepare_kwargs"),
+                solve_kwargs=moscot_kw.get("solve_kwargs"),
+                align_kwargs=moscot_kw.get("align_kwargs"),
             )
         else:
-            if method is None:
-                method = "lddmm"
+            stalign_kw.setdefault("method", method or "lddmm")
+            stalign_kw.setdefault("spatial_key", spatial_key)
+            stalign_kw.setdefault("key_added", key_added)
+            stalign_kw.setdefault("copy", copy)
             if verbose:
                 print("[align] Using STalign (rasterise) for point-to-point alignment")
-            return _align_points_to_points_stalign(
-                source, target,
-                spatial_key=spatial_key,
-                method=method,
-                resolution=resolution, blur=blur,
-                niter=niter, diffeo_start=diffeo_start,
-                a=a, p=p, sigmaM=sigmaM, sigmaR=sigmaR,
-                initial_rotation_deg=initial_rotation_deg,
-                landmark_source=landmark_source,
-                landmark_target=landmark_target,
-                device=device, verbose=verbose,
-                key_added=key_added, copy=copy,
-                **kwargs,
-            )
+            return _align_points_to_points_stalign(source, target, **stalign_kw)
 
     # ----- Point-to-image -------------------------------------------------
     if src_type in ("anndata", "coords") and tgt_type == "image":
         if src_type == "coords":
             source = _coords_to_adata(np.asarray(source), spatial_key)
-        return _align_points_to_image_stalign(
-            source, np.asarray(target),
-            spatial_key=spatial_key,
-            method=method if method in ("affine", "lddmm") else "lddmm",
-            resolution=resolution, blur=blur,
-            niter=niter, diffeo_start=diffeo_start,
-            a=a, p=p, sigmaM=sigmaM, sigmaR=sigmaR,
-            initial_rotation_deg=initial_rotation_deg,
-            landmark_source=landmark_source,
-            landmark_target=landmark_target,
-            device=device, verbose=verbose,
-            key_added=key_added, copy=copy,
-            **kwargs,
-        )
+        stalign_kw.setdefault("method", method if method in ("affine", "lddmm") else "lddmm")
+        stalign_kw.setdefault("spatial_key", spatial_key)
+        stalign_kw.setdefault("key_added", key_added)
+        stalign_kw.setdefault("copy", copy)
+        return _align_points_to_image_stalign(source, np.asarray(target), **stalign_kw)
 
     # ----- Image-to-image -------------------------------------------------
     if src_type == "image" and tgt_type == "image":
-        return _align_images_stalign(
-            np.asarray(source), np.asarray(target),
-            method=method if method in ("affine", "lddmm") else "lddmm",
-            niter=niter, diffeo_start=diffeo_start,
-            a=a, p=p, sigmaM=sigmaM, sigmaR=sigmaR,
-            initial_rotation_deg=initial_rotation_deg,
-            landmark_source=landmark_source,
-            landmark_target=landmark_target,
-            device=device, verbose=verbose,
-            **kwargs,
-        )
+        stalign_kw.setdefault("method", method if method in ("affine", "lddmm") else "lddmm")
+        return _align_images_stalign(np.asarray(source), np.asarray(target), **stalign_kw)
 
     raise TypeError(
         f"Unsupported alignment combination: {src_type} → {tgt_type}.\n"
