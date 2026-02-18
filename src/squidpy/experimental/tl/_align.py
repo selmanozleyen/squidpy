@@ -249,6 +249,24 @@ def _align_points_moscot(
 
     # Solve ---
     solve_kw.setdefault("max_iterations", 100)
+
+    # When using low-rank, scale_cost="mean" (moscot's default) forces OTT
+    # to materialise the full (n, m) cost matrix just to compute its mean.
+    # Replace with an approximate mean computed from a small subsample.
+    _rank = solve_kw.get("rank", -1)
+    _sc = solve_kw.get("scale_cost", "mean")
+    if _rank > -1 and _sc == "mean":
+        rng = np.random.default_rng(0)
+        k = min(2000, n_src, n_tgt)
+        sub_s = coords_src[rng.choice(n_src, k, replace=False)]
+        sub_t = coords_tgt[rng.choice(n_tgt, k, replace=False)]
+        diffs = sub_s[:, np.newaxis, :] - sub_t[np.newaxis, :, :]
+        approx_mean = float((diffs ** 2).sum(axis=-1).mean())
+        solve_kw["scale_cost"] = approx_mean
+        if verbose:
+            print(f"[moscot] Low-rank: scale_cost='mean' replaced with "
+                  f"subsample estimate {approx_mean:.2f}")
+
     if verbose:
         print("[moscot] Solving linear optimal-transport (Sinkhorn) ...")
     sp = sp.solve(**solve_kw)
@@ -258,26 +276,46 @@ def _align_points_moscot(
     if verbose:
         print(f"[moscot] Computing aligned coordinates (mode={mode!r}) ...")
 
-    # Transport matrix: shape (n_src, n_tgt)
     solution = sp.solutions[(src_label, tgt_label)]
-    tmap = solution.transport_matrix
-    if not isinstance(tmap, np.ndarray):
-        tmap = np.asarray(tmap)
 
-    # Normalise rows so each source cell gets a proper weighted average.
-    row_sums = tmap.sum(axis=1, keepdims=True)
-    row_sums = np.where(row_sums == 0, 1.0, row_sums)  # avoid division by zero
-    tmap_norm = tmap / row_sums
+    # Use lazy pull / push when possible to avoid materialising the full
+    # (n_src × n_tgt) transport matrix.  This is critical for low-rank
+    # solves and also helps full-rank at large scale.
+    use_lazy = hasattr(solution, "pull")
+    if verbose and use_lazy:
+        rank_info = getattr(solution, "rank", -1)
+        print(f"[moscot] Using lazy transport (rank={rank_info})")
+
+    def _pull(vec: np.ndarray) -> np.ndarray:
+        """Compute T @ vec without materialising T when possible.
+
+        ``solution.pull(x)`` computes T @ x lazily via dual potentials
+        (full-rank) or low-rank factors (LRSinkhorn).
+        """
+        if use_lazy:
+            import jax.numpy as jnp
+            result = solution.pull(jnp.asarray(vec))
+            return np.asarray(result)
+        # Fallback: materialise (for older moscot versions)
+        tmap = solution.transport_matrix
+        if not isinstance(tmap, np.ndarray):
+            tmap = np.asarray(tmap)
+        return tmap @ vec
+
+    # Row sums for normalisation: T @ 1_m
+    ones_tgt = np.ones(n_tgt, dtype=np.float32)
+    row_sums = _pull(ones_tgt)
+    row_sums = np.where(row_sums == 0, 1.0, row_sums)
 
     if mode == "warp":
-        # Each source cell → weighted average of target positions.
-        aligned_coords = tmap_norm @ coords_tgt
+        pulled = _pull(coords_tgt)
+        aligned_coords = pulled / row_sums[:, np.newaxis]
     elif mode == "affine":
-        # Rigid (rotation + translation) estimated from the transport plan.
         from scipy.linalg import svd as _svd
 
         tgt_centered = coords_tgt - coords_tgt.mean(axis=0)
-        out = tmap_norm @ tgt_centered  # projected source in centred-target space
+        pulled_centered = _pull(tgt_centered)
+        out = pulled_centered / row_sums[:, np.newaxis]
         src_centered = coords_src - coords_src.mean(axis=0)
         H = src_centered.T @ out
         U, _, Vt = _svd(H)
@@ -822,6 +860,7 @@ def align(
     # Common -----------------------------------------------------------------
     spatial_key: str = "spatial",
     method: Literal["affine", "lddmm", "optimal_transport"] | None = None,
+    rank: int = -1,
     device: str = "cpu",
     verbose: bool = True,
     key_added: str = "spatial_aligned",
@@ -862,6 +901,12 @@ def align(
         ``"optimal_transport"`` — force moscot.
         ``"lddmm"`` — force STalign LDDMM.
         ``"affine"`` — affine-only via STalign.
+    rank
+        Rank for the low-rank OT solver (moscot / OTT-JAX ``LRSinkhorn``).
+        ``-1`` (default) uses the full-rank Sinkhorn solver.
+        A positive integer triggers the low-rank solver which avoids
+        materialising the full ``(n, m)`` transport matrix, making it
+        feasible for large point clouds.  Typical values: 50–500.
     device
         PyTorch device for STalign (``"cpu"`` or ``"cuda:0"``).
     verbose
@@ -955,6 +1000,12 @@ def align(
     """
     moscot_kw: dict[str, Any] = dict(moscot_kwargs or {})
     stalign_kw: dict[str, Any] = dict(stalign_kwargs or {})
+
+    # Inject rank into moscot solve_kwargs if specified at top level.
+    if rank != -1:
+        solve_kw = dict(moscot_kw.get("solve_kwargs") or {})
+        solve_kw.setdefault("rank", rank)
+        moscot_kw["solve_kwargs"] = solve_kw
 
     # Inject top-level common params into stalign_kw (all stalign funcs
     # accept these).  User overrides in stalign_kwargs take precedence.
