@@ -1,0 +1,9 @@
+{
+    "arch": "arm64",
+    "cpu": "Apple M3",
+    "machine": "MBDHQ7R3QLFG",
+    "num_cpu": "8",
+    "os": "Darwin 24.4.0",
+    "ram": "25769803776",
+    "version": 1
+}
