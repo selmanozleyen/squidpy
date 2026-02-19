@@ -16,8 +16,8 @@ def test_sepal_seq_par(adata: AnnData):
     adata.var["highly_variable"] = rng.choice([True, False], size=adata.var_names.shape, p=[0.005, 0.995])
 
     sepal(adata, max_neighs=6)
-    df = sepal(adata, max_neighs=6, copy=True, n_jobs=1)
-    df_parallel = sepal(adata, max_neighs=6, copy=True, n_jobs=2)
+    df = sepal(adata, max_neighs=6, copy=True)
+    df_parallel = sepal(adata, max_neighs=6, copy=True)
 
     idx_df = df.index.values
     idx_adata = adata[:, adata.var.highly_variable.values].var_names.values
@@ -41,7 +41,7 @@ def test_sepal_square_seq_par(adata_squaregrid: AnnData):
     adata.var["highly_variable"] = rng.choice([True, False], size=adata.var_names.shape)
 
     sepal(adata, max_neighs=4)
-    df_parallel = sepal(adata, copy=True, n_jobs=2, max_neighs=4)
+    df_parallel = sepal(adata, copy=True, max_neighs=4)
 
     idx_df = df_parallel.index.values
     idx_adata = adata[:, adata.var.highly_variable.values].var_names.values

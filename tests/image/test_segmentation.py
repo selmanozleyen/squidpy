@@ -188,8 +188,8 @@ class TestHighLevel:
         assert Key.img.segment("watershed") in res
 
     def test_parallelize(self, small_cont: ImageContainer):
-        res1 = segment(small_cont, layer="image", n_jobs=1, copy=True)
-        res2 = segment(small_cont, layer="image", n_jobs=2, copy=True)
+        res1 = segment(small_cont, layer="image", copy=True)
+        res2 = segment(small_cont, layer="image", copy=True)
 
         np.testing.assert_array_equal(
             res1[Key.img.segment("watershed")].values, res2[Key.img.segment("watershed")].values

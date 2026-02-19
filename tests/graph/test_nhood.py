@@ -30,21 +30,19 @@ class TestNhoodEnrichment:
 
         self._assert_common(adata)
 
-    @pytest.mark.parametrize("backend", ["threading", "multiprocessing", "loky"])
-    def test_parallel_works(self, adata: AnnData, backend: str):
+    def test_parallel_works(self, adata: AnnData):
         spatial_neighbors(adata)
 
-        nhood_enrichment(adata, cluster_key=_CK, n_jobs=2, n_perms=20, backend=backend)
+        nhood_enrichment(adata, cluster_key=_CK, n_perms=20)
 
         self._assert_common(adata)
 
-    @pytest.mark.parametrize("n_jobs", [1, 2])
-    def test_reproducibility(self, adata: AnnData, n_jobs: int):
+    def test_reproducibility(self, adata: AnnData):
         spatial_neighbors(adata)
 
-        res1 = nhood_enrichment(adata, cluster_key=_CK, seed=42, n_jobs=n_jobs, n_perms=20, copy=True)
-        res2 = nhood_enrichment(adata, cluster_key=_CK, seed=42, n_jobs=n_jobs, n_perms=20, copy=True)
-        res3 = nhood_enrichment(adata, cluster_key=_CK, seed=43, n_jobs=n_jobs, n_perms=20, copy=True)
+        res1 = nhood_enrichment(adata, cluster_key=_CK, seed=42, n_perms=20, copy=True)
+        res2 = nhood_enrichment(adata, cluster_key=_CK, seed=42, n_perms=20, copy=True)
+        res3 = nhood_enrichment(adata, cluster_key=_CK, seed=43, n_perms=20, copy=True)
 
         assert len(res1) == len(res2)
         assert len(res2) == len(res3)

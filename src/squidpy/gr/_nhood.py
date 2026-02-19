@@ -2,25 +2,25 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable
 from functools import partial
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import networkx as nx
 import numba.types as nt
 import numpy as np
 import pandas as pd
 from anndata import AnnData
-from numba import njit
 from numpy.typing import NDArray
-from pandas import CategoricalDtype
 from scanpy import logging as logg
+from scipy.sparse import csr_matrix
 from spatialdata import SpatialData
+from tqdm.auto import tqdm
 
 from squidpy._constants._constants import Centrality
 from squidpy._constants._pkg_constants import Key
 from squidpy._docs import d, inject_docs
-from squidpy._utils import NDArrayA, Signal, SigQueue, _get_n_cores, parallelize
+from squidpy._utils import NDArrayA
 from squidpy.gr._utils import (
     _assert_categorical_obs,
     _assert_connectivity_key,
@@ -143,9 +143,6 @@ def nhood_enrichment(
     numba_parallel: bool = False,
     seed: int | None = None,
     copy: bool = False,
-    n_jobs: int | None = None,
-    backend: str = "loky",
-    show_progress_bar: bool = True,
 ) -> NhoodEnrichmentResult | None:
     """
     Compute neighborhood enrichment by permutation test.
@@ -160,7 +157,6 @@ def nhood_enrichment(
     %(numba_parallel)s
     %(seed)s
     %(copy)s
-    %(parallelize)s
 
     Returns
     -------
@@ -195,25 +191,18 @@ def nhood_enrichment(
     _test = _create_function(n_cls, parallel=numba_parallel)
     count = _test(indices, indptr, int_clust)
 
-    n_jobs = _get_n_cores(n_jobs)
-    start = logg.info(f"Calculating neighborhood enrichment using `{n_jobs}` core(s)")
+    start = logg.info("Calculating neighborhood enrichment")
 
-    perms = parallelize(
-        _nhood_enrichment_helper,
-        collection=np.arange(n_perms).tolist(),
-        extractor=np.vstack,
-        n_jobs=n_jobs,
-        backend=backend,
-        show_progress_bar=show_progress_bar,
-    )(
-        callback=_test,
-        indices=indices,
-        indptr=indptr,
-        int_clust=int_clust,
-        libraries=libraries,
-        n_cls=n_cls,
-        seed=seed,
-    )
+    rs = np.random.RandomState(seed=seed)
+    perms = np.empty((n_perms, n_cls, n_cls), dtype=np.float64)
+    for p in range(n_perms):
+        clust_copy = int_clust.copy()
+        if libraries is not None:
+            clust_copy = _shuffle_group(clust_copy, libraries, rs)
+        else:
+            rs.shuffle(clust_copy)
+        perms[p] = _test(indices, indptr, clust_copy)
+
     zscore = (count - perms.mean(axis=0)) / perms.std(axis=0)
 
     if copy:
@@ -236,8 +225,6 @@ def centrality_scores(
     score: str | Iterable[str] | None = None,
     connectivity_key: str | None = None,
     copy: bool = False,
-    n_jobs: int | None = None,
-    backend: str = "loky",
     show_progress_bar: bool = False,
 ) -> pd.DataFrame | None:
     """
@@ -259,7 +246,8 @@ def centrality_scores(
 
     %(conn_key)s
     %(copy)s
-    %(parallelize)s
+    show_progress_bar
+        Whether to show a progress bar.
 
     Returns
     -------
@@ -297,20 +285,16 @@ def centrality_scores(
         else:
             raise NotImplementedError(f"Centrality `{c}` is not yet implemented.")
 
-    n_jobs = _get_n_cores(n_jobs)
-    start = logg.info(f"Calculating centralities `{centralities}` using `{n_jobs}` core(s)")
+    start = logg.info(f"Calculating centralities `{centralities}`")
 
     res_list = []
     for k, v in fun_dict.items():
-        df = parallelize(
-            _centrality_scores_helper,
-            collection=cat,
-            extractor=pd.concat,
-            n_jobs=n_jobs,
-            backend=backend,
-            show_progress_bar=show_progress_bar,
-        )(clusters=clusters, fun=v, method=k)
-        res_list.append(df)
+        scores = []
+        iterator = tqdm(cat, disable=not show_progress_bar)
+        for c in iterator:
+            idx = np.where(clusters == c)[0]
+            scores.append(v(idx))
+        res_list.append(pd.DataFrame(scores, columns=[k], index=cat))
 
     df = pd.concat(res_list, axis=1)
 
@@ -372,11 +356,13 @@ def interaction_matrix(
     g = g[mask, :][:, mask]
     n_cats = len(cats.cat.categories)
 
-    g_data = g.data if weights else np.broadcast_to(1, shape=len(g.data))
-    dtype = int if pd.api.types.is_bool_dtype(g.dtype) or pd.api.types.is_integer_dtype(g.dtype) else float
-    output: NDArrayA = np.zeros((n_cats, n_cats), dtype=dtype)
+    if not weights:
+        g = g.astype(bool).astype(int)
 
-    _interaction_matrix(g_data, g.indices, g.indptr, cats.cat.codes.to_numpy(), output)
+    codes = cats.cat.codes.to_numpy()
+    n_cells = len(codes)
+    indicator = csr_matrix((np.ones(n_cells, dtype=g.dtype), (np.arange(n_cells), codes)), shape=(n_cells, n_cats))
+    output = (indicator.T @ g @ indicator).toarray()
 
     if normalized:
         output = output / output.sum(axis=1).reshape((-1, 1))
@@ -385,76 +371,3 @@ def interaction_matrix(
         return output
 
     _save_data(adata, attr="uns", key=Key.uns.interaction_matrix(cluster_key), data=output)
-
-
-@njit
-def _interaction_matrix(
-    data: NDArrayA,
-    indices: NDArrayA,
-    indptr: NDArrayA,
-    cats: NDArrayA,
-    output: NDArrayA,
-) -> NDArrayA:
-    indices_list = np.split(indices, indptr[1:-1])
-    data_list = np.split(data, indptr[1:-1])
-    for i in range(len(data_list)):
-        cur_row = cats[i]
-        cur_indices = indices_list[i]
-        cur_data = data_list[i]
-        for j, val in zip(cur_indices, cur_data):  # noqa: B905
-            cur_col = cats[j]
-            output[cur_row, cur_col] += val
-    return output
-
-
-def _centrality_scores_helper(
-    cat: Iterable[Any],
-    clusters: Sequence[str],
-    fun: Callable[..., float],
-    method: str,
-    queue: SigQueue | None = None,
-) -> pd.DataFrame:
-    res_list = []
-    for c in cat:
-        idx = np.where(clusters == c)[0]
-        res = fun(idx)
-        res_list.append(res)
-
-        if queue is not None:
-            queue.put(Signal.UPDATE)
-
-    if queue is not None:
-        queue.put(Signal.FINISH)
-
-    return pd.DataFrame(res_list, columns=[method], index=cat)
-
-
-def _nhood_enrichment_helper(
-    ixs: NDArrayA,
-    callback: Callable[[NDArrayA, NDArrayA, NDArrayA], NDArrayA],
-    indices: NDArrayA,
-    indptr: NDArrayA,
-    int_clust: NDArrayA,
-    libraries: pd.Series[CategoricalDtype] | None,
-    n_cls: int,
-    seed: int | None = None,
-    queue: SigQueue | None = None,
-) -> NDArrayA:
-    perms = np.empty((len(ixs), n_cls, n_cls), dtype=np.float64)
-    int_clust = int_clust.copy()  # threading
-    rs = np.random.RandomState(seed=None if seed is None else seed + ixs[0])
-
-    for i in range(len(ixs)):
-        if libraries is not None:
-            int_clust = _shuffle_group(int_clust, libraries, rs)
-        else:
-            rs.shuffle(int_clust)
-        perms[i, ...] = callback(indices, indptr, int_clust)
-
-        if queue is not None:
-            queue.put(Signal.UPDATE)
-
-    if queue is not None:
-        queue.put(Signal.FINISH)
-
-    return perms

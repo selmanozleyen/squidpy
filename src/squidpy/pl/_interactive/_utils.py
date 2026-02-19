@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 from anndata import AnnData
 from matplotlib.colors import to_hex, to_rgb
-from numba import njit
 from pandas import CategoricalDtype
 from pandas.api.types import infer_dtype
 from scanpy import logging as logg
@@ -61,18 +60,11 @@ def _position_cluster_labels(coords: NDArrayA, clusters: pd.Series, colors: NDAr
 
 
 def _not_in_01(arr: NDArrayA | da.Array) -> bool:
-    @njit
-    def _helper_arr(arr: NDArrayA) -> bool:
-        for val in arr.flat:
-            if not (0 <= val <= 1):
-                return True
-
-        return False
-
     if isinstance(arr, da.Array):
-        return bool(np.min(arr) < 0 or np.max(arr) > 1)  # cast needed
+        return bool(np.min(arr) < 0 or np.max(arr) > 1)
 
-    return bool(_helper_arr(np.asarray(arr)))
+    arr = np.asarray(arr)
+    return bool(np.any((arr < 0) | (arr > 1)))
 
 
 def _display_channelwise(arr: NDArrayA | da.Array) -> bool:

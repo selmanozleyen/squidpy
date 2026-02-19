@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 from anndata import AnnData
 from scanpy import logging as logg
+from tqdm.auto import tqdm
 
 from squidpy._constants._constants import ImageFeature
 from squidpy._docs import d, inject_docs
-from squidpy._utils import Signal, SigQueue, _get_n_cores, parallelize
 from squidpy.gr._utils import _save_data
 from squidpy.im._container import ImageContainer
 
@@ -28,8 +28,6 @@ def calculate_image_features(
     features_kwargs: Mapping[str, Mapping[str, Any]] = MappingProxyType({}),
     key_added: str = "img_features",
     copy: bool = False,
-    n_jobs: int | None = None,
-    backend: str = "loky",
     show_progress_bar: bool = True,
     **kwargs: Any,
 ) -> pd.DataFrame | None:
@@ -62,7 +60,8 @@ def calculate_image_features(
     key_added
         Key in :attr:`anndata.AnnData.obsm` where to store the calculated features.
     %(copy)s
-    %(parallelize)s
+    show_progress_bar
+        Whether to show a progress bar.
     kwargs
         Keyword arguments for :meth:`squidpy.im.ImageContainer.generate_spot_crops`.
 
@@ -84,43 +83,17 @@ def calculate_image_features(
         features = [features]
     features = sorted({ImageFeature(f).s for f in features})
 
-    n_jobs = _get_n_cores(n_jobs)
-    start = logg.info(f"Calculating features `{list(features)}` using `{n_jobs}` core(s)")
+    start = logg.info(f"Calculating features `{list(features)}`")
 
-    res = parallelize(
-        _calculate_image_features_helper,
-        collection=adata.obs_names,
-        extractor=pd.concat,
-        n_jobs=n_jobs,
-        backend=backend,
-        show_progress_bar=show_progress_bar,
-    )(adata, img, layer=layer, library_id=library_id, features=features, features_kwargs=features_kwargs, **kwargs)
-
-    if copy:
-        logg.info("Finish", time=start)
-        return res
-
-    _save_data(adata, attr="obsm", key=key_added, data=res, time=start)
-
-
-def _calculate_image_features_helper(
-    obs_ids: Sequence[str],
-    adata: AnnData,
-    img: ImageContainer,
-    layer: str,
-    library_id: str | Sequence[str] | None,
-    features: list[ImageFeature],
-    features_kwargs: Mapping[str, Any],
-    queue: SigQueue | None = None,
-    **kwargs: Any,
-) -> pd.DataFrame:
     features_list = []
-    for crop in img.generate_spot_crops(
-        adata, obs_names=obs_ids, library_id=library_id, return_obs=False, as_array=False, **kwargs
+    obs_ids = list(adata.obs_names)
+    for crop in tqdm(
+        img.generate_spot_crops(adata, library_id=library_id, return_obs=False, as_array=False, **kwargs),
+        total=len(obs_ids),
+        disable=not show_progress_bar,
     ):
         if TYPE_CHECKING:
             assert isinstance(crop, ImageContainer)
-        # load crop in memory to enable faster processing
         crop = crop.compute(layer)
 
         features_dict = {}
@@ -139,16 +112,16 @@ def _calculate_image_features_helper(
             elif feature == ImageFeature.CUSTOM:
                 res = crop.features_custom(layer=layer, **feature_kwargs)
             else:
-                # should never get here
                 raise NotImplementedError(f"Feature `{feature}` is not yet implemented.")
 
             features_dict.update(res)
         features_list.append(features_dict)
 
-        if queue is not None:
-            queue.put(Signal.UPDATE)
+    res = pd.concat([pd.DataFrame([fd]) for fd in features_list], ignore_index=True)
+    res.index = obs_ids
 
-    if queue is not None:
-        queue.put(Signal.FINISH)
+    if copy:
+        logg.info("Finish", time=start)
+        return res
 
-    return pd.DataFrame(features_list, index=list(obs_ids))
+    _save_data(adata, attr="obsm", key=key_added, data=res, time=start)

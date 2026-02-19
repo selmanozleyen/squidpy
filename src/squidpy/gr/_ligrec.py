@@ -5,7 +5,6 @@ from __future__ import annotations
 from abc import ABC
 from collections import namedtuple
 from collections.abc import Iterable, Mapping, Sequence
-from functools import partial
 from itertools import product
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
@@ -20,7 +19,7 @@ from spatialdata import SpatialData
 from squidpy._constants._constants import ComplexPolicy, CorrAxis
 from squidpy._constants._pkg_constants import Key
 from squidpy._docs import d, inject_docs
-from squidpy._utils import NDArrayA, Signal, SigQueue, _get_n_cores, parallelize
+from squidpy._utils import NDArrayA
 from squidpy.gr._utils import (
     _assert_categorical_obs,
     _assert_positive,
@@ -357,7 +356,6 @@ class PermutationTestABC(ABC):
             Key in :attr:`anndata.AnnData.uns` where the result is stored if ``copy = False``.
             If `None`, ``'{{cluster_key}}_ligrec'`` will be used.
         %(numba_parallel)s
-        %(parallelize)s
 
         Returns
         -------
@@ -410,10 +408,9 @@ class PermutationTestABC(ABC):
         # much faster than applymap (tested on 1M interactions)
         interactions_ = np.vectorize(lambda g: gene_mapper[g])(interactions.values)
 
-        n_jobs = _get_n_cores(kwargs.pop("n_jobs", None))
         start = logg.info(
             f"Running `{n_perms}` permutations on `{len(interactions)}` interactions "
-            f"and `{len(clusters)}` cluster combinations using `{n_jobs}` core(s)"
+            f"and `{len(clusters)}` cluster combinations"
         )
         res = _analysis(
             data,
@@ -422,9 +419,7 @@ class PermutationTestABC(ABC):
             threshold=threshold,
             n_perms=n_perms,
             seed=seed,
-            n_jobs=n_jobs,
             numba_parallel=numba_parallel,
-            **kwargs,
         )
         res = {
             "means": _create_sparse_df(
@@ -688,9 +683,7 @@ def _analysis(
     threshold: float = 0.1,
     n_perms: int = 1000,
     seed: int | None = None,
-    n_jobs: int = 1,
     numba_parallel: bool | None = None,
-    **kwargs: Any,
 ) -> TempResult:
     """
     Run the analysis as described in :cite:`cellphonedb`.
@@ -709,12 +702,8 @@ def _analysis(
         Percentage threshold for removing lowly expressed genes in clusters.
     %(n_perms)s
     %(seed)s
-    n_jobs
-        Number of parallel jobs to launch.
     numba_parallel
         Whether to use :func:`numba.prange` or not. If `None`, it's determined automatically.
-    kwargs
-        Keyword arguments for :func:`squidpy._utils.parallelize`, such as ``n_jobs`` or ``backend``.
 
     Returns
     -------
@@ -723,21 +712,6 @@ def _analysis(
         - `'means'` - array of shape `(n_interactions, n_interaction_clusters)` containing the means.
         - `'pvalues'` - array of shape `(n_interactions, n_interaction_clusters)` containing the p-values.
     """
-
-    def extractor(res: Sequence[TempResult]) -> TempResult:
-        assert len(res) == n_jobs, f"Expected to find `{n_jobs}` results, found `{len(res)}`."
-
-        meanss: list[NDArrayA] = [r.means for r in res if r.means is not None]
-        assert len(meanss) == 1, f"Only `1` job should've calculated the means, but found `{len(meanss)}`."
-        means = meanss[0]
-        if TYPE_CHECKING:
-            assert isinstance(means, np.ndarray)
-
-        pvalues = np.sum([r.pvalues for r in res if r.pvalues is not None], axis=0) / float(n_perms)
-        assert means.shape == pvalues.shape, f"Means and p-values differ in shape: `{means.shape}`, `{pvalues.shape}`."
-
-        return TempResult(means=means, pvalues=pvalues)
-
     groups = data.groupby("clusters", observed=True)
     clustering = np.array(data["clusters"].values, dtype=np.int32)
 
@@ -750,115 +724,48 @@ def _analysis(
 
     # (n_cells, n_genes)
     data = np.array(data[data.columns.difference(["clusters"])].values, dtype=np.float64, order="C")
-    # all 3 should be C contiguous
-    return parallelize(  # type: ignore[no-any-return]
-        _analysis_helper,
-        np.arange(n_perms, dtype=np.int32).tolist(),
-        n_jobs=n_jobs,
-        unit="permutation",
-        extractor=extractor,
-        **kwargs,
-    )(
-        data,
-        mean,
-        mask,
-        interactions,
-        interaction_clusters=interaction_clusters,
-        clustering=clustering,
-        seed=seed,
-        numba_parallel=numba_parallel,
-    )
 
-
-def _analysis_helper(
-    perms: NDArrayA,
-    data: NDArrayA,
-    mean: NDArrayA,
-    mask: NDArrayA,
-    interactions: NDArrayA,
-    interaction_clusters: NDArrayA,
-    clustering: NDArrayA,
-    seed: int | None = None,
-    numba_parallel: bool | None = None,
-    queue: SigQueue | None = None,
-) -> TempResult:
-    """
-    Run the results of mean, percent and shuffled analysis.
-
-    Parameters
-    ----------
-    perms
-        Permutation indices. Only used to set the ``seed``.
-    data
-        Array of shape `(n_cells, n_genes)`.
-    mean
-        Array of shape `(n_genes, n_clusters)` representing mean expression per cluster.
-    mask
-        Array of shape `(n_genes, n_clusters)` containing `True` if the a gene within a cluster is
-        expressed at least in ``threshold`` percentage of cells.
-    interactions
-        Array of shape `(n_interactions, 2)`.
-    interaction_clusters
-        Array of shape `(n_interaction_clusters, 2)`.
-    clustering
-        Array of shape `(n_cells,)` containing the original clustering.
-    seed
-        Random seed for :class:`numpy.random.RandomState`.
-    numba_parallel
-        Whether to use :func:`numba.prange` or not. If `None`, it's determined automatically.
-    queue
-        Signalling queue to update progress bar.
-
-    Returns
-    -------
-    Tuple of the following format:
-
-        - `'means'` - array of shape `(n_interactions, n_interaction_clusters)` containing the true test
-          statistic. It is `None` if ``min(perms)!=0`` so that only 1 worker calculates it.
-        - `'pvalues'` - array of shape `(n_interactions, n_interaction_clusters)`  containing `np.sum(T0 > T)`
-          where `T0` is the test statistic under null hypothesis and `T` is the true test statistic.
-    """
-    rs = np.random.RandomState(None if seed is None else perms[0] + seed)
-
-    clustering = clustering.copy()
     n_cls = mean.shape[1]
-    return_means = np.min(perms) == 0
-
-    # ideally, these would be both sparse array, but there is no numba impl. (sparse.COO is read-only and very limited)
-    # keep it f64, because we're setting NaN
     res = np.zeros((len(interactions), len(interaction_clusters)), dtype=np.float64)
     numba_parallel = (
-        (np.prod(res.shape) >= 2**20 or clustering.shape[0] >= 2**15) if numba_parallel is None else numba_parallel  # type: ignore[assignment]
+        (np.prod(res.shape) >= 2**20 or clustering.shape[0] >= 2**15) if numba_parallel is None else numba_parallel
     )
 
-    fn_key = f"_test_{n_cls}_{int(return_means)}_{bool(numba_parallel)}"
+    # compile the means kernel (first permutation computes means)
+    fn_key_means = f"_test_{n_cls}_1_{bool(numba_parallel)}"
+    if fn_key_means not in globals():
+        exec(
+            compile(_create_template(n_cls, return_means=True, parallel=numba_parallel), "", "exec"),
+            globals(),
+        )
+    _test_means = globals()[fn_key_means]
+
+    # compile the no-means kernel (subsequent permutations)
+    fn_key = f"_test_{n_cls}_0_{bool(numba_parallel)}"
     if fn_key not in globals():
         exec(
-            compile(_create_template(n_cls, return_means=return_means, parallel=numba_parallel), "", "exec"),  # type: ignore[arg-type]
+            compile(_create_template(n_cls, return_means=False, parallel=numba_parallel), "", "exec"),
             globals(),
         )
     _test = globals()[fn_key]
 
-    if return_means:
-        res_means: NDArrayA | None = np.zeros((len(interactions), len(interaction_clusters)), dtype=np.float64)
-        test = partial(_test, res_means=res_means)
-    else:
-        res_means = None
-        test = _test
+    rs = np.random.RandomState(seed)
+    clustering = clustering.copy()
+    res_means: NDArrayA = np.zeros((len(interactions), len(interaction_clusters)), dtype=np.float64)
 
-    for _ in perms:
+    # first permutation: compute means
+    rs.shuffle(clustering)
+    error = _test_means(interactions, interaction_clusters, data, clustering, mean, mask, res=res, res_means=res_means)
+    if error:
+        raise ValueError("In the execution of the numba function, an unhandled case was encountered.")
+
+    # remaining permutations
+    for _ in range(1, n_perms):
         rs.shuffle(clustering)
-        error = test(interactions, interaction_clusters, data, clustering, mean, mask, res=res)
+        error = _test(interactions, interaction_clusters, data, clustering, mean, mask, res=res)
         if error:
-            raise ValueError("In the execution of the numba function, an unhandled case was encountered. ")
-            # This is mainly to avoid a numba warning
-            # Otherwise, the numba function wouldn't be
-            # executed in parallel
-            # See: https://github.com/scverse/squidpy/issues/994
-        if queue is not None:
-            queue.put(Signal.UPDATE)
+            raise ValueError("In the execution of the numba function, an unhandled case was encountered.")
 
-    if queue is not None:
-        queue.put(Signal.FINISH)
+    pvalues = res / float(n_perms)
 
-    return TempResult(means=res_means, pvalues=res)
+    return TempResult(means=res_means, pvalues=pvalues)
