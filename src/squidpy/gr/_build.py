@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Iterable
-from functools import partial
-from itertools import chain
 from typing import Any, NamedTuple, cast
 
 import geopandas as gpd
@@ -13,20 +10,13 @@ import numpy as np
 import pandas as pd
 from anndata import AnnData
 from anndata.utils import make_index_unique
-from fast_array_utils import stats as fau_stats
-from numba import njit, prange
+from numba import njit
 from scipy.sparse import (
-    SparseEfficiencyWarning,
     block_diag,
-    csr_array,
     csr_matrix,
-    isspmatrix_csr,
     spmatrix,
 )
-from scipy.spatial import Delaunay
 from shapely import LineString, MultiPolygon, Polygon
-from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
-from sklearn.neighbors import NearestNeighbors
 from spatialdata import SpatialData
 from spatialdata._core.centroids import get_centroids
 from spatialdata._core.query.relational_query import get_element_instances, match_element_to_table
@@ -47,6 +37,12 @@ from squidpy.gr._utils import (
     _assert_positive,
     _assert_spatial_basis,
     _save_data,
+)
+from squidpy.gr.neighbors._builders import (
+    DelaunayBuilder,
+    GridBuilder,
+    KNNBuilder,
+    RadiusBuilder,
 )
 
 __all__ = ["spatial_neighbors"]
@@ -216,9 +212,7 @@ def spatial_neighbors(
     start = logg.info(
         f"Creating graph using `{coord_type}` coordinates and `{transform}` transform and `{len(libs)}` libraries."
     )
-    _build_fun = partial(
-        _spatial_neighbor,
-        spatial_key=spatial_key,
+    builder = _make_builder(
         coord_type=coord_type,
         n_neighs=n_neighs,
         radius=radius,
@@ -234,12 +228,12 @@ def spatial_neighbors(
         ixs: list[int] = []
         for lib in libs:
             ixs.extend(np.where(adata.obs[library_key] == lib)[0])
-            mats.append(_build_fun(adata[adata.obs[library_key] == lib]))
+            mats.append(builder.build(adata[adata.obs[library_key] == lib].obsm[spatial_key]))
         ixs = cast(list[int], np.argsort(ixs).tolist())
         Adj = block_diag([m[0] for m in mats], format="csr")[ixs, :][:, ixs]
         Dst = block_diag([m[1] for m in mats], format="csr")[ixs, :][:, ixs]
     else:
-        Adj, Dst = _build_fun(adata)
+        Adj, Dst = builder.build(adata.obsm[spatial_key])
 
     neighs_key = Key.uns.spatial_neighs(key_added)
     conns_key = Key.obsp.spatial_conn(key_added)
@@ -262,246 +256,42 @@ def spatial_neighbors(
     _save_data(adata, attr="obsp", key=conns_key, data=Adj)
     _save_data(adata, attr="obsp", key=dists_key, data=Dst, prefix=False)
     _save_data(adata, attr="uns", key=neighs_key, data=neighbors_dict, prefix=False, time=start)
+    return None
 
 
-def _spatial_neighbor(
-    adata: AnnData,
-    spatial_key: str = Key.obsm.spatial,
-    coord_type: str | CoordType | None = None,
+def _make_builder(
+    coord_type: CoordType,
     n_neighs: int = 6,
     radius: float | tuple[float, float] | None = None,
     delaunay: bool = False,
     n_rings: int = 1,
-    transform: str | Transform | None = None,
+    transform: Transform = Transform.NONE,
     set_diag: bool = False,
     percentile: float | None = None,
-) -> tuple[csr_matrix, csr_matrix]:
-    coords = adata.obsm[spatial_key]
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", SparseEfficiencyWarning)
-        if coord_type == CoordType.GRID:
-            Adj, Dst = _build_grid(
-                coords,
-                n_neighs=n_neighs,
-                n_rings=n_rings,
-                delaunay=delaunay,
-                set_diag=set_diag,
-            )
-        elif coord_type == CoordType.GENERIC:
-            Adj, Dst = _build_connectivity(
-                coords,
-                n_neighs=n_neighs,
-                radius=radius,
-                delaunay=delaunay,
-                return_distance=True,
-                set_diag=set_diag,
-            )
-        else:
-            raise NotImplementedError(f"Coordinate type `{coord_type}` is not yet implemented.")
+) -> GridBuilder | KNNBuilder | DelaunayBuilder | RadiusBuilder:
+    """Construct the appropriate GraphBuilder from spatial_neighbors parameters."""
+    base = dict(transform=transform, set_diag=set_diag, percentile=percentile)
 
-    if coord_type == CoordType.GENERIC and isinstance(radius, Iterable):
-        minn, maxx = sorted(radius)[:2]
-        mask = (Dst.data < minn) | (Dst.data > maxx)
-        a_diag = Adj.diagonal()
-
-        Dst.data[mask] = 0.0
-        Adj.data[mask] = 0.0
-        Adj.setdiag(a_diag)
-
-    if percentile is not None and coord_type == CoordType.GENERIC:
-        threshold = np.percentile(Dst.data, percentile)
-        Adj[Dst > threshold] = 0.0
-        Dst[Dst > threshold] = 0.0
-
-    Adj.eliminate_zeros()
-    Dst.eliminate_zeros()
-
-    # check transform
-    if transform == Transform.SPECTRAL:
-        Adj = _transform_a_spectral(Adj)
-    elif transform == Transform.COSINE:
-        Adj = _transform_a_cosine(Adj)
-    elif transform == Transform.NONE:
-        pass
-    else:
-        raise NotImplementedError(f"Transform `{transform}` is not yet implemented.")
-
-    return Adj, Dst
-
-
-def _build_grid(
-    coords: NDArrayA,
-    n_neighs: int,
-    n_rings: int,
-    delaunay: bool = False,
-    set_diag: bool = False,
-) -> tuple[csr_matrix, csr_matrix]:
-    if n_rings > 1:
-        Adj: csr_matrix = _build_connectivity(
-            coords,
+    if coord_type == CoordType.GRID:
+        return GridBuilder(
             n_neighs=n_neighs,
-            neigh_correct=True,
-            set_diag=True,
+            n_rings=n_rings,
             delaunay=delaunay,
-            return_distance=False,
+            **base,
         )
-        Res, Walk = Adj, Adj
-        for i in range(n_rings - 1):
-            Walk = Walk @ Adj
-            Walk[Res.nonzero()] = 0.0
-            Walk.eliminate_zeros()
-            Walk.data[:] = i + 2.0
-            Res = Res + Walk
-        Adj = Res
-        Adj.setdiag(float(set_diag))
-        Adj.eliminate_zeros()
 
-        Dst = Adj.copy()
-        Adj.data[:] = 1.0
-    else:
-        Adj = _build_connectivity(
-            coords,
-            n_neighs=n_neighs,
-            neigh_correct=True,
-            delaunay=delaunay,
-            set_diag=set_diag,
-        )
-        Dst = Adj.copy()
+    if coord_type != CoordType.GENERIC:
+        raise NotImplementedError(f"Coordinate type `{coord_type}` is not yet implemented.")
 
-    Dst.setdiag(0.0)
+    radius_bounds = tuple(radius) if isinstance(radius, Iterable) else None
 
-    return Adj, Dst
-
-
-def _build_connectivity(
-    coords: NDArrayA,
-    n_neighs: int,
-    radius: float | tuple[float, float] | None = None,
-    delaunay: bool = False,
-    neigh_correct: bool = False,
-    set_diag: bool = False,
-    return_distance: bool = False,
-) -> csr_matrix | tuple[csr_matrix, csr_matrix]:
-    N = coords.shape[0]
     if delaunay:
-        tri = Delaunay(coords)
-        indptr, indices = tri.vertex_neighbor_vertices
-        Adj = csr_matrix((np.ones_like(indices, dtype=np.float32), indices, indptr), shape=(N, N))
+        return DelaunayBuilder(radius_bounds=radius_bounds, **base)
 
-        if return_distance:
-            # fmt: off
-            dists = np.array(list(chain(*(
-                euclidean_distances(coords[indices[indptr[i] : indptr[i + 1]], :], coords[np.newaxis, i, :])
-                for i in range(N)
-                if len(indices[indptr[i] : indptr[i + 1]])
-            )))).squeeze()
-            Dst = csr_matrix((dists, indices, indptr), shape=(N, N))
-            # fmt: on
-    else:
-        r = 1 if radius is None else radius if isinstance(radius, int | float) else max(radius)
-        tree = NearestNeighbors(n_neighbors=n_neighs, radius=r, metric="euclidean")
-        tree.fit(coords)
+    if isinstance(radius, int | float):
+        return RadiusBuilder(radius=radius, n_neighs=n_neighs, **base)
 
-        if radius is None:
-            dists, col_indices = tree.kneighbors()
-            dists, col_indices = dists.reshape(-1), col_indices.reshape(-1)
-            row_indices = np.repeat(np.arange(N), n_neighs)
-            if neigh_correct:
-                dist_cutoff = np.median(dists) * 1.3  # there's a small amount of sway
-                mask = dists < dist_cutoff
-                row_indices, col_indices, dists = (
-                    row_indices[mask],
-                    col_indices[mask],
-                    dists[mask],
-                )
-        else:
-            dists, col_indices = tree.radius_neighbors()
-            row_indices = np.repeat(np.arange(N), [len(x) for x in col_indices])
-            dists = np.concatenate(dists)
-            col_indices = np.concatenate(col_indices)
-
-        Adj = csr_matrix(
-            (np.ones_like(row_indices, dtype=np.float32), (row_indices, col_indices)),
-            shape=(N, N),
-        )
-        if return_distance:
-            Dst = csr_matrix((dists, (row_indices, col_indices)), shape=(N, N))
-
-    # radius-based filtering needs same indices/indptr: do not remove 0s
-    Adj.setdiag(1.0 if set_diag else Adj.diagonal())
-    if return_distance:
-        Dst.setdiag(0.0)
-        return Adj, Dst
-
-    return Adj
-
-
-@njit
-def _csr_bilateral_diag_scale_helper(
-    mat: csr_array | csr_matrix,
-    degrees: NDArrayA,
-) -> NDArrayA:
-    """
-    Return an array F aligned with CSR non-zeros such that
-    F[k] = d[i] * data[k] * d[j] for the k-th non-zero (i, j) in CSR order.
-
-    Parameters
-    ----------
-
-    data : array of float
-        CSR `data` (non-zero values).
-    indices : array of int
-        CSR `indices` (column indices).
-    indptr : array of int
-        CSR `indptr` (row pointer).
-    degrees : array of float, shape (n,)
-        Diagonal scaling vector.
-
-    Returns
-    -------
-    array of float
-        Length equals len(data). Entry-wise factors d_i * d_j * data[k]
-    """
-
-    res = np.empty_like(mat.data, dtype=np.float32)
-    for i in prange(len(mat.indptr) - 1):
-        ixs = mat.indices[mat.indptr[i] : mat.indptr[i + 1]]
-        res[mat.indptr[i] : mat.indptr[i + 1]] = degrees[i] * degrees[ixs] * mat.data[mat.indptr[i] : mat.indptr[i + 1]]
-
-    return res
-
-
-def symmetric_normalize_csr(adj: spmatrix) -> csr_matrix:
-    """
-    Return D^{-1/2} * A * D^{-1/2}, where D = diag(degrees(A)) and A = adj.
-
-
-    Parameters
-    ----------
-    adj : scipy.sparse.csr_matrix
-
-    Returns
-    -------
-    scipy.sparse.csr_matrix
-    """
-    degrees = np.squeeze(np.array(np.sqrt(1.0 / fau_stats.sum(adj, axis=0))))
-    if adj.shape[0] != len(degrees):
-        raise ValueError("len(degrees) must equal number of rows of adj")
-    res_data = _csr_bilateral_diag_scale_helper(adj, degrees)
-    return csr_matrix((res_data, adj.indices, adj.indptr), shape=adj.shape)
-
-
-def _transform_a_spectral(a: spmatrix) -> spmatrix:
-    if not isspmatrix_csr(a):
-        a = a.tocsr()
-    if not a.nnz:
-        return a
-
-    return symmetric_normalize_csr(a)
-
-
-def _transform_a_cosine(a: spmatrix) -> spmatrix:
-    return cosine_similarity(a, dense_output=False)
+    return KNNBuilder(n_neighs=n_neighs, radius_bounds=radius_bounds, **base)
 
 
 @d.dedent

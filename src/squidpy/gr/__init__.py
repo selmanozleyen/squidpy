@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from squidpy.gr import neighbors
 from squidpy.gr._build import SpatialNeighborsResult, mask_graph, spatial_neighbors
 from squidpy.gr._ligrec import ligrec
 from squidpy.gr._nhood import (
@@ -19,6 +20,7 @@ __all__ = [
     "SpatialNeighborsResult",
     "NhoodEnrichmentResult",
     "mask_graph",
+    "neighbors",
     "spatial_neighbors",
     "ligrec",
     "centrality_scores",

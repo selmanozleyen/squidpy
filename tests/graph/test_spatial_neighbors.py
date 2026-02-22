@@ -12,7 +12,7 @@ from spatialdata.datasets import blobs
 
 from squidpy._constants._pkg_constants import Key
 from squidpy.gr import mask_graph, spatial_neighbors
-from squidpy.gr._build import _build_connectivity
+from squidpy.gr.neighbors import KNN
 
 
 class TestSpatialNeighbors:
@@ -222,7 +222,7 @@ class TestSpatialNeighbors:
         assert not ((result.connectivities != result_filtered.connectivities).nnz == 0)
         assert result.distances.max() > result_filtered.distances.max()
 
-        Adj, Dst = _build_connectivity(adata_hne.obsm["spatial"], n_neighs=6, return_distance=True, set_diag=False)
+        Adj, Dst = KNN(n_neighs=6).build(adata_hne.obsm["spatial"])
         threshold = np.percentile(Dst.data, percentile)
         Adj[Dst > threshold] = 0.0
         Dst[Dst > threshold] = 0.0
