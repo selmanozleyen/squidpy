@@ -2,19 +2,19 @@
 
 Dispatches to the appropriate backend based on input types:
 
-- **Point-to-point**: :mod:`moscot` optimal transport (optional)
+- **Point-to-point**: :mod:`ott` optimal transport (optional)
 - **Point-to-image** / **Image-to-image**: STalign LDDMM (requires ``torch``)
 
 Install optional dependencies::
 
-    pip install 'squidpy[moscot]'    # point-to-point OT alignment
+    pip install 'squidpy[ott]'       # point-to-point OT alignment
     pip install 'squidpy[torch]'     # image-based LDDMM alignment
     pip install 'squidpy[align]'     # both
 
 Notes
 -----
 STalign reference: Clifton *et al.*, Nature Communications 14, 8123 (2023).
-moscot reference: Klein *et al.*, (2023).
+ott-jax reference: Cuturi *et al.*, (2022).
 """
 
 from __future__ import annotations
@@ -46,20 +46,20 @@ def _check_stalign_deps() -> None:
         ) from e
 
 
-def _check_moscot() -> None:
-    """Ensure ``moscot`` is available for point-to-point alignment."""
+def _check_ott() -> None:
+    """Ensure ``ott-jax`` is available for point-to-point OT alignment."""
     try:
-        import moscot  # noqa: F401
+        import ott  # noqa: F401
     except ImportError as e:
         raise ImportError(
-            "Point-to-point alignment requires moscot.\n"
-            "Install with:  pip install 'squidpy[moscot]'"
+            "Point-to-point OT alignment requires ott-jax.\n"
+            "Install with:  pip install ott-jax"
         ) from e
 
 
-def _has_moscot() -> bool:
+def _has_ott() -> bool:
     try:
-        import moscot  # noqa: F401
+        import ott  # noqa: F401
         return True
     except ImportError:
         return False
@@ -145,10 +145,174 @@ def _coords_to_adata(
 
 
 # ---------------------------------------------------------------------------
-# Backend: moscot  (point-to-point)
+# Spatial binning helpers
 # ---------------------------------------------------------------------------
 
-def _align_points_moscot(
+def _bin_points(
+    coords: "NDArray[np.floating]",
+    n_bins: int | tuple[int, int],
+    *,
+    range_xy: tuple[tuple[float, float], tuple[float, float]] | None = None,
+) -> tuple["NDArray[np.floating]", "NDArray[np.floating]", "NDArray[np.integer]"]:
+    """Bin 2-D coordinates into a regular grid.
+
+    Parameters
+    ----------
+    coords
+        (N, 2) array of (x, y) coordinates.
+    n_bins
+        Number of bins per axis (single int -> same for both axes).
+    range_xy
+        ((xmin, xmax), (ymin, ymax)) for the grid.  Computed from
+        *coords* if ``None``.
+
+    Returns
+    -------
+    centroids
+        (B, 2) array -- centroid of each non-empty bin.
+    weights
+        (B,) array -- fraction of points in each bin (sums to 1).
+    bin_labels
+        (N,) array -- bin index for each original point (indices into
+        *centroids*).
+    """
+    coords = np.asarray(coords, dtype=np.float64)
+    if isinstance(n_bins, int):
+        n_bins = (n_bins, n_bins)
+
+    if range_xy is None:
+        xmin, ymin = coords.min(axis=0)
+        xmax, ymax = coords.max(axis=0)
+        range_xy = ((xmin, xmax), (ymin, ymax))
+
+    (xmin, xmax), (ymin, ymax) = range_xy
+    bx = np.clip(
+        ((coords[:, 0] - xmin) / (xmax - xmin) * n_bins[0]).astype(int),
+        0, n_bins[0] - 1,
+    )
+    by = np.clip(
+        ((coords[:, 1] - ymin) / (ymax - ymin) * n_bins[1]).astype(int),
+        0, n_bins[1] - 1,
+    )
+    flat = bx * n_bins[1] + by
+
+    unique_bins, inverse, counts = np.unique(flat, return_inverse=True, return_counts=True)
+
+    centroids = np.zeros((len(unique_bins), 2), dtype=np.float64)
+    np.add.at(centroids[:, 0], inverse, coords[:, 0])
+    np.add.at(centroids[:, 1], inverse, coords[:, 1])
+    centroids /= counts[:, np.newaxis]
+
+    weights = counts.astype(np.float64)
+    weights /= weights.sum()
+
+    return centroids, weights, inverse
+
+
+def _choose_n_bins(n_points: int, max_bins: int = 5000) -> int:
+    """Pick a grid resolution for one point cloud.
+
+    Target roughly *max_bins* non-empty bins, scaled down for smaller
+    datasets.  Returns bins-per-axis (the grid will be n x n).
+    """
+    target = min(max_bins, max(200, n_points // 20))
+    return max(10, int(np.sqrt(target)))
+
+
+# ---------------------------------------------------------------------------
+# Backend: ott-jax  (point-to-point)
+# ---------------------------------------------------------------------------
+
+_POINTCLOUD_KEYS = frozenset({
+    "epsilon", "relative_epsilon", "scale_cost", "cost_fn", "batch_size",
+})
+_SOLVE_KEYS = frozenset({"tau_a", "tau_b", "rank"})
+
+
+def _solve_sinkhorn(
+    x: "NDArray[np.floating]",
+    y: "NDArray[np.floating]",
+    a: "NDArray[np.floating] | None" = None,
+    b: "NDArray[np.floating] | None" = None,
+    verbose: bool = False,
+    **kwargs: Any,
+) -> Any:
+    """Solve a linear OT problem with OTT-JAX.
+
+    Parameters
+    ----------
+    x, y
+        (n, d) and (m, d) point clouds.
+    a, b
+        Source / target marginals (probability vectors).  Uniform if ``None``.
+    verbose
+        Print solver diagnostics.
+    **kwargs
+        Routed automatically:
+
+        - ``epsilon``, ``scale_cost``, ``cost_fn``, ``batch_size`` ->
+          ``ott.geometry.pointcloud.PointCloud``
+        - ``tau_a``, ``tau_b``, ``rank`` ->
+          ``ott.solvers.linear.solve``
+        - everything else (``max_iterations``, ``threshold``, ...) ->
+          ``Sinkhorn`` / ``LRSinkhorn`` constructor via ``solve(**kwargs)``
+
+    Returns
+    -------
+    ``SinkhornOutput`` (or ``LRSinkhornOutput``).  Access the transport
+    matrix via ``.matrix`` (jax array).
+    """
+    import jax.numpy as jnp
+    from ott.geometry.pointcloud import PointCloud
+    from ott.solvers.linear import solve as ot_solve
+
+    geom_kw = {k: kwargs.pop(k) for k in list(kwargs) if k in _POINTCLOUD_KEYS}
+    solve_kw = {k: kwargs.pop(k) for k in list(kwargs) if k in _SOLVE_KEYS}
+    sinkhorn_kw = kwargs
+
+    # Normalise costs so that epsilon values are interpretable.
+    # Without this, spatial coordinates in the thousands produce squared
+    # Euclidean costs in the millions and the auto-epsilon is far too large.
+    geom_kw.setdefault("scale_cost", "mean")
+
+    # OTT-JAX default epsilon is 0.05 * mean_cost (after scaling ~= 0.05).
+    # For spatial alignment this is too diffuse -- source bins spread mass
+    # over large neighborhoods instead of matching nearby targets.  A tighter
+    # epsilon produces sharper transport plans at the cost of more iterations.
+    geom_kw.setdefault("epsilon", 1e-2)
+
+    x_jnp = jnp.asarray(x)
+    y_jnp = jnp.asarray(y)
+    geom = PointCloud(x_jnp, y_jnp, **geom_kw)
+
+    if verbose:
+        print(f"[ott] PointCloud: {geom_kw or '(defaults)'}")
+        print(f"[ott] solve:      {solve_kw or '(defaults)'}")
+        print(f"[ott] Sinkhorn:   {sinkhorn_kw or '(defaults)'}")
+        print(f"[ott] cost matrix: mean={float(geom.mean_cost_matrix):.4f}  "
+              f"shape=({len(x)}, {len(y)})  "
+              f"epsilon={float(geom.epsilon):.6f}")
+
+    a_jnp = jnp.asarray(a) if a is not None else None
+    b_jnp = jnp.asarray(b) if b is not None else None
+
+    out = ot_solve(geom, a=a_jnp, b=b_jnp, **solve_kw, **sinkhorn_kw)
+
+    converged = bool(out.converged)
+    n_iters = int(out.n_iters)
+    if verbose:
+        print(f"[ott] converged={converged}  iterations={n_iters}")
+    if not converged:
+        warnings.warn(
+            f"Sinkhorn did not converge in {n_iters} iterations. "
+            "Consider increasing max_iterations or epsilon.",
+            stacklevel=3,
+        )
+
+    return out
+
+
+def _align_points_ot(
     adata_source: "AnnData",
     adata_target: "AnnData",
     *,
@@ -156,186 +320,245 @@ def _align_points_moscot(
     key_added: str = "spatial_aligned",
     copy: bool = False,
     verbose: bool = True,
-    prepare_kwargs: dict[str, Any] | None = None,
     solve_kwargs: dict[str, Any] | None = None,
     align_kwargs: dict[str, Any] | None = None,
 ) -> "AnnData | None":
-    """Align two point clouds via :class:`moscot.problems.generic.SinkhornProblem`.
+    """Align two point clouds via OTT-JAX Sinkhorn.
 
-    Solves a **linear** optimal-transport problem (Sinkhorn) using spatial
-    coordinates as the cost (``joint_attr``).  Because source and target
-    live in the same coordinate space the linear cost directly measures
-    how far each source point is from each target point — no
-    Gromov-Wasserstein comparison of distance structures is needed.
-
-    After solving, aligned coordinates are computed from the transport
-    plan:
-
-    * **warp** — each source cell is mapped to the weighted average of
-      target positions: ``T_norm @ target_coords``.
-    * **affine** — a rigid (rotation + translation) transformation is
-      estimated from the transport plan via SVD.
+    Solves a linear OT problem using spatial coordinates as the cost.
 
     Parameters
     ----------
     adata_source / adata_target
         AnnData objects with spatial coordinates in ``obsm[spatial_key]``.
-    spatial_key
-        Key in ``obsm`` for spatial coordinates.
-    key_added
-        obsm key where aligned coordinates are stored.
-    copy
-        Return a modified copy instead of modifying *adata_source* in place.
-    verbose
-        Print progress.
-    prepare_kwargs
-        Keyword arguments forwarded to ``SinkhornProblem.prepare()``.
-        Useful keys: ``cost``, ``a``, ``b``.
     solve_kwargs
-        Keyword arguments forwarded to ``SinkhornProblem.solve()``.
-        Useful keys: ``epsilon``, ``tau_a``, ``tau_b``,
-        ``max_iterations``, ``threshold``.
+        Forwarded to :func:`_solve_sinkhorn` / ``ott.solvers.linear.solve``.
+        Useful keys: ``epsilon``, ``scale_cost``, ``max_iterations``,
+        ``threshold``, ``tau_a``, ``tau_b``.
     align_kwargs
-        Extra options for the alignment step.
-        Useful keys: ``mode`` (``'warp'`` | ``'affine'``, default ``'warp'``).
-
-    Returns
-    -------
-    Modified *adata_source* (if *copy*) or ``None``.
+        ``mode`` (``'warp'`` | ``'affine'``, default ``'warp'``).
     """
-    _check_moscot()
-    import anndata as ad
-    from moscot.problems.generic import SinkhornProblem
+    _check_ott()
+    import jax.numpy as jnp
 
-    prepare_kw: dict[str, Any] = dict(prepare_kwargs or {})
     solve_kw: dict[str, Any] = dict(solve_kwargs or {})
     align_kw: dict[str, Any] = dict(align_kwargs or {})
 
-    batch_key = "_align_batch"
-    src_label, tgt_label = "source", "target"
-
-    # Build a lightweight combined AnnData with spatial coordinates only.
-    n_src = adata_source.n_obs
-    n_tgt = adata_target.n_obs
-
-    obs_src = adata_source.obs.copy()
-    obs_tgt = adata_target.obs.copy()
-    obs_src[batch_key] = src_label
-    obs_tgt[batch_key] = tgt_label
-    obs_combined = pd.concat([obs_src, obs_tgt], ignore_index=True)
-    obs_combined[batch_key] = obs_combined[batch_key].astype("category")
-
-    coords_src = np.asarray(adata_source.obsm[spatial_key])
-    coords_tgt = np.asarray(adata_target.obsm[spatial_key])
-
-    adata_combined = ad.AnnData(
-        X=np.zeros((n_src + n_tgt, 1)),
-        obs=obs_combined,
-    )
-    adata_combined.obsm[spatial_key] = np.vstack([coords_src, coords_tgt])
+    coords_src = np.asarray(adata_source.obsm[spatial_key], dtype=np.float64)
+    coords_tgt = np.asarray(adata_target.obsm[spatial_key], dtype=np.float64)
+    n_src, n_tgt = len(coords_src), len(coords_tgt)
 
     if verbose:
-        print(
-            f"[moscot] Combined AnnData: {n_src + n_tgt} cells "
-            f"({n_src} source + {n_tgt} target)"
-        )
+        print(f"[ott] {n_src} source + {n_tgt} target = {n_src + n_tgt} cells")
+        print("[ott] Solving Sinkhorn ...")
 
-    # Prepare --- linear OT with spatial coords as the cost term.
-    prepare_kw.setdefault("joint_attr", {"attr": "obsm", "key": spatial_key})
-    prepare_kw.setdefault("policy", "star")
-    prepare_kw.setdefault("reference", tgt_label)
-    sp = SinkhornProblem(adata_combined)
-    sp = sp.prepare(key=batch_key, **prepare_kw)
+    ot_out = _solve_sinkhorn(coords_src, coords_tgt, verbose=verbose, **solve_kw)
+    T = ot_out.matrix  # jax array (n_src, n_tgt)
 
-    # Solve ---
-    solve_kw.setdefault("max_iterations", 100)
-
-    # When using low-rank, scale_cost="mean" (moscot's default) forces OTT
-    # to materialise the full (n, m) cost matrix just to compute its mean.
-    # Replace with an approximate mean computed from a small subsample.
-    _rank = solve_kw.get("rank", -1)
-    _sc = solve_kw.get("scale_cost", "mean")
-    if _rank > -1 and _sc == "mean":
-        rng = np.random.default_rng(0)
-        k = min(2000, n_src, n_tgt)
-        sub_s = coords_src[rng.choice(n_src, k, replace=False)]
-        sub_t = coords_tgt[rng.choice(n_tgt, k, replace=False)]
-        diffs = sub_s[:, np.newaxis, :] - sub_t[np.newaxis, :, :]
-        approx_mean = float((diffs ** 2).sum(axis=-1).mean())
-        solve_kw["scale_cost"] = approx_mean
-        if verbose:
-            print(f"[moscot] Low-rank: scale_cost='mean' replaced with "
-                  f"subsample estimate {approx_mean:.2f}")
-
-    if verbose:
-        print("[moscot] Solving linear optimal-transport (Sinkhorn) ...")
-    sp = sp.solve(**solve_kw)
-
-    # Compute aligned coordinates from the transport plan ----
     mode = align_kw.pop("mode", "warp")
     if verbose:
-        print(f"[moscot] Computing aligned coordinates (mode={mode!r}) ...")
+        print(f"[ott] Computing aligned coordinates (mode={mode!r}) ...")
 
-    solution = sp.solutions[(src_label, tgt_label)]
+    row_sums = T.sum(axis=1)
+    row_sums = jnp.where(row_sums > 1e-10, row_sums, 1.0)
+    T_norm = T / row_sums[:, None]
 
-    # Use lazy pull / push when possible to avoid materialising the full
-    # (n_src × n_tgt) transport matrix.  This is critical for low-rank
-    # solves and also helps full-rank at large scale.
-    use_lazy = hasattr(solution, "pull")
-    if verbose and use_lazy:
-        rank_info = getattr(solution, "rank", -1)
-        print(f"[moscot] Using lazy transport (rank={rank_info})")
-
-    def _pull(vec: np.ndarray) -> np.ndarray:
-        """Compute T @ vec without materialising T when possible.
-
-        ``solution.pull(x)`` computes T @ x lazily via dual potentials
-        (full-rank) or low-rank factors (LRSinkhorn).
-        """
-        if use_lazy:
-            import jax.numpy as jnp
-            result = solution.pull(jnp.asarray(vec))
-            return np.asarray(result)
-        # Fallback: materialise (for older moscot versions)
-        tmap = solution.transport_matrix
-        if not isinstance(tmap, np.ndarray):
-            tmap = np.asarray(tmap)
-        return tmap @ vec
-
-    # Row sums for normalisation: T @ 1_m
-    ones_tgt = np.ones(n_tgt, dtype=np.float32)
-    row_sums = _pull(ones_tgt)
-    row_sums = np.where(row_sums == 0, 1.0, row_sums)
+    tgt = jnp.asarray(coords_tgt)
 
     if mode == "warp":
-        pulled = _pull(coords_tgt)
-        aligned_coords = pulled / row_sums[:, np.newaxis]
+        aligned_coords = np.asarray(T_norm @ tgt)
     elif mode == "affine":
         from scipy.linalg import svd as _svd
 
-        tgt_centered = coords_tgt - coords_tgt.mean(axis=0)
-        pulled_centered = _pull(tgt_centered)
-        out = pulled_centered / row_sums[:, np.newaxis]
+        tgt_mean = tgt.mean(axis=0)
+        out = np.asarray(T_norm @ (tgt - tgt_mean))
         src_centered = coords_src - coords_src.mean(axis=0)
         H = src_centered.T @ out
         U, _, Vt = _svd(H)
         R = Vt.T @ U.T
-        aligned_coords = (R @ src_centered.T).T + coords_tgt.mean(axis=0)
+        aligned_coords = (R @ src_centered.T).T + np.asarray(tgt_mean)
     else:
         raise ValueError(f"Unsupported alignment mode {mode!r}. Use 'warp' or 'affine'.")
 
-    # Store ---
     adata = adata_source.copy() if copy else adata_source
     adata.obsm[key_added] = aligned_coords
     adata.uns["spatial_alignment"] = {
         "method": "optimal_transport",
-        "backend": "moscot",
+        "backend": "ott-jax",
         "spatial_key": spatial_key,
         "mode": mode,
     }
 
     if verbose:
-        print(f"[moscot] Aligned coordinates stored in obsm['{key_added}']")
+        print(f"[ott] Aligned coordinates stored in obsm['{key_added}']")
+
+    return adata if copy else None
+
+
+# ---------------------------------------------------------------------------
+# Backend: ott-jax  (binned point-to-point for large data)
+# ---------------------------------------------------------------------------
+
+def _align_points_ot_binned(
+    adata_source: "AnnData",
+    adata_target: "AnnData",
+    *,
+    spatial_key: str = "spatial",
+    key_added: str = "spatial_aligned",
+    copy: bool = False,
+    verbose: bool = True,
+    n_bins: int | tuple[int, int] | None = None,
+    solve_kwargs: dict[str, Any] | None = None,
+    align_kwargs: dict[str, Any] | None = None,
+) -> "AnnData | None":
+    """Align two large point clouds by binning, solving OT on centroids,
+    then interpolating back to original cells.
+
+    Steps
+    -----
+    1. Bin source and target coordinates into a regular spatial grid.
+    2. Compute the centroid and weight (fraction of points) for each
+       non-empty bin.
+    3. Solve Sinkhorn OT (via ott-jax) on the (much smaller) centroid
+       point clouds, using bin weights as marginals ``a`` and ``b``.
+    4. Extract the affine or warp transformation from the coarse
+       transport plan and apply it to *all* original source cells.
+
+    Each side is binned at its own resolution proportional to its cell
+    count so that denser datasets get finer grids.
+
+    Parameters
+    ----------
+    n_bins
+        Grid resolution per axis.  ``None`` picks automatically and
+        independently for source and target based on cell counts.
+        An ``int`` uses the same grid for both sides.
+        A tuple ``(src_bins, tgt_bins)`` sets each side independently.
+    """
+    _check_ott()
+
+    solve_kw: dict[str, Any] = dict(solve_kwargs or {})
+    align_kw: dict[str, Any] = dict(align_kwargs or {})
+
+    coords_src = np.asarray(adata_source.obsm[spatial_key], dtype=np.float64)
+    coords_tgt = np.asarray(adata_target.obsm[spatial_key], dtype=np.float64)
+    n_src = len(coords_src)
+    n_tgt = len(coords_tgt)
+
+    # Resolve per-side grid resolutions.
+    if n_bins is None:
+        nb_src = _choose_n_bins(n_src)
+        nb_tgt = _choose_n_bins(n_tgt)
+    elif isinstance(n_bins, int):
+        nb_src = nb_tgt = n_bins
+    else:
+        nb_src, nb_tgt = n_bins
+    grid_src = (nb_src, nb_src)
+    grid_tgt = (nb_tgt, nb_tgt)
+
+    # -- Step 1: Bin each point cloud at its own resolution -------------------
+    all_coords = np.vstack([coords_src, coords_tgt])
+    gmin = all_coords.min(axis=0)
+    gmax = all_coords.max(axis=0)
+    shared_range = ((gmin[0], gmax[0]), (gmin[1], gmax[1]))
+
+    cen_src, w_src, inv_src = _bin_points(coords_src, grid_src, range_xy=shared_range)
+    cen_tgt, w_tgt, inv_tgt = _bin_points(coords_tgt, grid_tgt, range_xy=shared_range)
+
+    nb_src_actual = len(cen_src)
+    nb_tgt_actual = len(cen_tgt)
+
+    if verbose:
+        print(
+            f"[ott-binned] Original: {n_src} source + {n_tgt} target = {n_src + n_tgt} cells"
+        )
+        print(
+            f"[ott-binned] Binned:   {nb_src_actual} source bins (grid {grid_src[0]}x{grid_src[1]}) + "
+            f"{nb_tgt_actual} target bins (grid {grid_tgt[0]}x{grid_tgt[1]})"
+        )
+
+    # -- Step 2: Solve Sinkhorn with weighted marginals -----------------------
+    if verbose:
+        print("[ott-binned] Solving Sinkhorn on binned centroids ...")
+
+    import jax.numpy as jnp
+
+    ot_out = _solve_sinkhorn(cen_src, cen_tgt, a=w_src, b=w_tgt, verbose=verbose, **solve_kw)
+    T = ot_out.matrix  # jax array
+
+    # -- Step 3: Extract transformation from coarse transport plan ------------
+    mode = align_kw.pop("mode", "warp")
+    if verbose:
+        print(f"[ott-binned] Computing transformation (mode={mode!r}) ...")
+
+    row_sums = T.sum(axis=1)
+    alive = np.asarray(row_sums > 1e-10)
+    row_sums_safe = jnp.where(row_sums > 1e-10, row_sums, 1.0)
+    T_norm = T / row_sums_safe[:, None]
+
+    if verbose:
+        n_dead = int((~alive).sum())
+        if n_dead:
+            print(f"[ott-binned] {n_dead}/{len(alive)} source bins received no mass")
+
+    # Weighted target positions for each source bin (the "OT barycenter").
+    warped_centroids = np.asarray(T_norm @ jnp.asarray(cen_tgt))
+
+    if mode == "warp":
+        from scipy.interpolate import RBFInterpolator
+
+        displacements = warped_centroids - cen_src
+
+        interp = RBFInterpolator(
+            cen_src[alive], displacements[alive], kernel="thin_plate_spline",
+        )
+        disp_all = interp(coords_src)
+        aligned_coords = coords_src + disp_all
+    elif mode == "affine":
+        from scipy.linalg import svd as _svd
+
+        tgt_mean = cen_tgt.mean(axis=0)
+        src_mean = cen_src[alive].mean(axis=0)
+        tgt_centered = cen_tgt - tgt_mean
+        out = np.asarray(T_norm[alive] @ jnp.asarray(tgt_centered))
+        src_centered = cen_src[alive] - src_mean
+        w_alive = w_src[alive]
+        H = (src_centered * w_alive[:, np.newaxis]).T @ out
+        U, _, Vt = _svd(H)
+        R = Vt.T @ U.T
+        if np.linalg.det(R) < 0:
+            Vt[-1, :] *= -1
+            R = Vt.T @ U.T
+        t = tgt_mean - R @ src_mean
+        aligned_coords = (R @ coords_src.T).T + t
+    else:
+        raise ValueError(f"Unsupported alignment mode {mode!r}. Use 'warp' or 'affine'.")
+
+    # -- Store ----------------------------------------------------------------
+    adata = adata_source.copy() if copy else adata_source
+    adata.obsm[key_added] = aligned_coords
+    adata.uns["spatial_alignment"] = {
+        "method": "optimal_transport",
+        "backend": "ott-jax",
+        "binned": True,
+        "grid_src": grid_src,
+        "grid_tgt": grid_tgt,
+        "n_bins_src": nb_src_actual,
+        "n_bins_tgt": nb_tgt_actual,
+        "spatial_key": spatial_key,
+        "mode": mode,
+    }
+    adata.uns["spatial_alignment_diag"] = {
+        "cen_src": cen_src,
+        "cen_tgt": cen_tgt,
+        "warped_centroids": warped_centroids,
+        "w_src": w_src,
+        "w_tgt": w_tgt,
+        "alive": alive,
+    }
+
+    if verbose:
+        print(f"[ott-binned] Aligned coordinates stored in obsm['{key_added}']")
 
     return adata if copy else None
 
@@ -527,7 +750,7 @@ def _align_points_to_points_stalign(
     """Align two point clouds by rasterising both and running LDDMM.
 
     This is the STalign fallback for point-to-point alignment when
-    moscot is not installed.
+    ott-jax is not installed.
     """
     _check_stalign_deps()
 
@@ -860,13 +1083,14 @@ def align(
     # Common -----------------------------------------------------------------
     spatial_key: str = "spatial",
     method: Literal["affine", "lddmm", "optimal_transport"] | None = None,
-    rank: int = -1,
+    n_bins: int | tuple[int, int] | Literal["auto"] | None = None,
     device: str = "cpu",
     verbose: bool = True,
     key_added: str = "spatial_aligned",
     copy: bool = False,
     # Backend-specific -------------------------------------------------------
-    moscot_kwargs: dict[str, Any] | None = None,
+    solve_kwargs: dict[str, Any] | None = None,
+    align_kwargs: dict[str, Any] | None = None,
     stalign_kwargs: dict[str, Any] | None = None,
     # SpatialData ------------------------------------------------------------
     source_image_key: str | None = None,
@@ -879,11 +1103,11 @@ def align(
     *source* and *target* are:
 
     ==============================  ==================  ====================
-    Source → Target                 Backend             Extra dependency
+    Source -> Target                 Backend             Extra dependency
     ==============================  ==================  ====================
-    AnnData → AnnData (points)      moscot (Sinkhorn)   ``pip install moscot``
-    AnnData → image                 STalign (LDDMM)     ``pip install torch``
-    image   → image                 STalign (LDDMM)     ``pip install torch``
+    AnnData -> AnnData (points)     ott-jax (Sinkhorn)  ``pip install ott-jax``
+    AnnData -> image                STalign (LDDMM)     ``pip install torch``
+    image   -> image                STalign (LDDMM)     ``pip install torch``
     SpatialData (image keys)        STalign (LDDMM)     ``pip install torch``
     ==============================  ==================  ====================
 
@@ -897,16 +1121,24 @@ def align(
     spatial_key
         ``obsm`` key for spatial coordinates (AnnData inputs).
     method
-        ``None`` — auto-select (moscot for point-to-point, LDDMM for images).
-        ``"optimal_transport"`` — force moscot.
+        ``None`` -- auto-select (ott-jax for point-to-point, LDDMM for images).
+        ``"optimal_transport"`` -- force ott-jax Sinkhorn.
         ``"lddmm"`` — force STalign LDDMM.
         ``"affine"`` — affine-only via STalign.
-    rank
-        Rank for the low-rank OT solver (moscot / OTT-JAX ``LRSinkhorn``).
-        ``-1`` (default) uses the full-rank Sinkhorn solver.
-        A positive integer triggers the low-rank solver which avoids
-        materialising the full ``(n, m)`` transport matrix, making it
-        feasible for large point clouds.  Typical values: 50–500.
+    n_bins
+        Spatial binning resolution for large point-to-point alignment
+        (OT backend only).  Both point clouds are binned into a
+        regular grid and OT is solved on the (much smaller) weighted
+        centroids, then the transformation is applied to all cells.
+
+        - ``None`` (default) -- no binning; use the full point clouds.
+        - ``"auto"`` -- enable binning when the total number of cells
+          exceeds 50 000 (grid resolution chosen automatically per
+          side based on cell count).
+        - ``int`` -- number of bins per axis, same for both sides
+          (e.g. 140 -> 140x140 grid for source and target).
+        - ``(int, int)`` -- ``(source_bins, target_bins)`` per axis,
+          allowing finer grids for denser datasets.
     device
         PyTorch device for STalign (``"cpu"`` or ``"cuda:0"``).
     verbose
@@ -915,17 +1147,15 @@ def align(
         ``obsm`` key for aligned coordinates (AnnData inputs).
     copy
         Return a modified copy of AnnData instead of in-place.
-    moscot_kwargs
-        Backend-specific options for moscot (linear OT / Sinkhorn), with
-        nested keys:
-
-        - ``'prepare_kwargs'`` → forwarded to ``SinkhornProblem.prepare()``.
-          Useful keys: ``cost``, ``a``, ``b``.
-        - ``'solve_kwargs'`` → forwarded to ``SinkhornProblem.solve()``.
-          Useful keys: ``epsilon``, ``tau_a``, ``tau_b``,
-          ``max_iterations``, ``threshold``.
-        - ``'align_kwargs'`` → extra alignment options.
-          Useful keys: ``mode`` (``'warp'`` or ``'affine'``).
+    solve_kwargs
+        Keyword arguments forwarded to ``ott.solvers.linear.solve``
+        (point-to-point OT backend).  Useful keys: ``epsilon``,
+        ``scale_cost``, ``max_iterations``, ``threshold``,
+        ``tau_a``, ``tau_b``.
+    align_kwargs
+        Options for the alignment step after OT is solved.
+        Useful keys: ``mode`` (``'warp'`` or ``'affine'``,
+        default ``'warp'``).
     stalign_kwargs
         Backend-specific options for STalign/LDDMM:
 
@@ -953,20 +1183,25 @@ def align(
 
     Examples
     --------
-    **Point-to-point** via moscot (warp mode):
+    **Point-to-point** via ott-jax (warp mode):
 
     >>> import squidpy as sq
     >>> sq.experimental.tl.align(adata_src, adata_tgt)
 
-    **Point-to-point** via moscot with custom params:
+    **Point-to-point** with custom params:
 
     >>> sq.experimental.tl.align(
     ...     adata_src, adata_tgt,
     ...     method="optimal_transport",
-    ...     moscot_kwargs={
-    ...         'solve_kwargs': {'alpha': 0.5, 'epsilon': 1e-2},
-    ...         'align_kwargs': {'mode': 'affine'},
-    ...     },
+    ...     solve_kwargs={'epsilon': 1e-2},
+    ...     align_kwargs={'mode': 'affine'},
+    ... )
+
+    **Point-to-point** with spatial binning (fast, large data):
+
+    >>> sq.experimental.tl.align(
+    ...     adata_src, adata_tgt,
+    ...     n_bins="auto",
     ... )
 
     **Point-to-point** via STalign (rasterise + LDDMM):
@@ -987,7 +1222,7 @@ def align(
 
     Notes
     -----
-    Based on STalign [1]_ for image alignment and moscot [2]_ for
+    Based on STalign [1]_ for image alignment and OTT-JAX [2]_ for
     optimal-transport alignment.
 
     References
@@ -995,17 +1230,12 @@ def align(
     .. [1] Clifton *et al.*, "STalign: Alignment of spatial
        transcriptomics data using diffeomorphic metric mapping",
        *Nat. Commun.* 14, 8123 (2023).
-    .. [2] Klein *et al.*, "moscot: Multi-omic single-cell optimal
-       transport tools" (2023).
+    .. [2] Cuturi *et al.*, "Optimal Transport Tools (OTT): A JAX
+       Toolbox for all things Wasserstein" (2022).
     """
-    moscot_kw: dict[str, Any] = dict(moscot_kwargs or {})
+    solve_kw: dict[str, Any] = dict(solve_kwargs or {})
+    align_kw: dict[str, Any] = dict(align_kwargs or {})
     stalign_kw: dict[str, Any] = dict(stalign_kwargs or {})
-
-    # Inject rank into moscot solve_kwargs if specified at top level.
-    if rank != -1:
-        solve_kw = dict(moscot_kw.get("solve_kwargs") or {})
-        solve_kw.setdefault("rank", rank)
-        moscot_kw["solve_kwargs"] = solve_kw
 
     # Inject top-level common params into stalign_kw (all stalign funcs
     # accept these).  User overrides in stalign_kwargs take precedence.
@@ -1032,31 +1262,58 @@ def align(
             target = _coords_to_adata(np.asarray(target), spatial_key)
 
         # Auto-select backend
-        use_moscot = False
+        use_ot = False
         if method == "optimal_transport":
-            use_moscot = True
+            use_ot = True
         elif method is None:
-            # Prefer moscot for point-to-point when available
-            if _has_moscot():
-                use_moscot = True
+            if _has_ott():
+                use_ot = True
             elif _has_torch():
-                use_moscot = False
+                use_ot = False
             else:
                 raise ImportError(
-                    "Point-to-point alignment requires either moscot or torch.\n"
-                    "Install with:  pip install moscot   OR   pip install torch"
+                    "Point-to-point alignment requires either ott-jax or torch.\n"
+                    "Install with:  pip install ott-jax   OR   pip install torch"
                 )
 
-        if use_moscot:
-            return _align_points_moscot(
+        if use_ot:
+            # Decide whether to use the binned (fast) path.
+            _AUTO_BIN_THRESHOLD = 50_000
+            use_binning = False
+            _n_bins = n_bins
+            if _n_bins == "auto":
+                n_total = source.n_obs + target.n_obs
+                if n_total > _AUTO_BIN_THRESHOLD:
+                    use_binning = True
+                    _n_bins = None  # per-side auto
+                    if verbose:
+                        print(
+                            f"[align] Auto-binning enabled: {n_total} cells "
+                            f"> {_AUTO_BIN_THRESHOLD} threshold"
+                        )
+            elif _n_bins is not None:
+                use_binning = True
+
+            if use_binning:
+                return _align_points_ot_binned(
+                    source, target,
+                    spatial_key=spatial_key,
+                    key_added=key_added,
+                    copy=copy,
+                    verbose=verbose,
+                    n_bins=_n_bins,
+                    solve_kwargs=solve_kw,
+                    align_kwargs=align_kw,
+                )
+
+            return _align_points_ot(
                 source, target,
                 spatial_key=spatial_key,
                 key_added=key_added,
                 copy=copy,
                 verbose=verbose,
-                prepare_kwargs=moscot_kw.get("prepare_kwargs"),
-                solve_kwargs=moscot_kw.get("solve_kwargs"),
-                align_kwargs=moscot_kw.get("align_kwargs"),
+                solve_kwargs=solve_kw,
+                align_kwargs=align_kw,
             )
         else:
             stalign_kw.setdefault("method", method or "lddmm")
@@ -1083,6 +1340,124 @@ def align(
         return _align_images_stalign(np.asarray(source), np.asarray(target), **stalign_kw)
 
     raise TypeError(
-        f"Unsupported alignment combination: {src_type} → {tgt_type}.\n"
-        f"Supported: points→points, points→image, image→image."
+        f"Unsupported alignment combination: {src_type} -> {tgt_type}.\n"
+        f"Supported: points->points, points->image, image->image."
     )
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic plot for binned OT alignment
+# ---------------------------------------------------------------------------
+
+def plot_ot_alignment(
+    adata_source: "AnnData",
+    adata_target: "AnnData",
+    *,
+    spatial_key: str = "spatial",
+    key_aligned: str = "spatial_aligned",
+    figsize: tuple[float, float] = (18, 6),
+    arrow_subsample: int | None = None,
+    arrow_scale: float = 1.0,
+    arrow_width: float = 0.002,
+    s_points: float = 0.3,
+    s_bins: float = 8,
+    alpha_points: float = 0.15,
+) -> Any:
+    """Three-panel diagnostic for binned OT alignment.
+
+    Panel 1 -- **Grid OT match**: source bin centroids (blue) and their
+    OT-warped positions (red arrows) overlaid on target centroids (orange).
+    Shows where the transport plan *wants* to send each source bin before
+    any interpolation.
+
+    Panel 2 -- **Displacement field**: quiver plot of the RBF-interpolated
+    displacement vectors evaluated at original source cell positions.
+
+    Panel 3 -- **Final overlay**: aligned source cells (blue) on top of
+    target cells (orange), same as the usual result plot.
+
+    Parameters
+    ----------
+    adata_source
+        Source AnnData *after* calling :func:`align` (must contain
+        ``uns['spatial_alignment_diag']`` and ``obsm[key_aligned]``).
+    adata_target
+        Target AnnData.
+    arrow_subsample
+        Show every *n*-th arrow to reduce clutter.  ``None`` shows all.
+    arrow_scale, arrow_width
+        Passed to :func:`matplotlib.pyplot.quiver`.
+    s_points
+        Marker size for individual cells.
+    s_bins
+        Marker size for bin centroids.
+    alpha_points
+        Alpha for individual cell scatter points.
+
+    Returns
+    -------
+    ``matplotlib.figure.Figure``
+    """
+    import matplotlib.pyplot as plt
+
+    diag = adata_source.uns.get("spatial_alignment_diag")
+    if diag is None:
+        raise ValueError(
+            "No diagnostic data found. Re-run align() with the latest code "
+            "so that adata.uns['spatial_alignment_diag'] is populated."
+        )
+
+    cen_src = diag["cen_src"]
+    cen_tgt = diag["cen_tgt"]
+    warped = diag["warped_centroids"]
+    alive = diag["alive"]
+
+    coords_src = np.asarray(adata_source.obsm[spatial_key])
+    coords_tgt = np.asarray(adata_target.obsm[spatial_key])
+    coords_aligned = np.asarray(adata_source.obsm[key_aligned])
+
+    disp_bin = warped - cen_src  # per-bin displacement from OT
+
+    # Subsample arrows for readability
+    idx = np.where(alive)[0]
+    if arrow_subsample is not None and arrow_subsample > 1:
+        idx = idx[::arrow_subsample]
+
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+
+    # -- Panel 1: Grid OT match (bin-level) -----------------------------------
+    ax = axes[0]
+    ax.scatter(cen_tgt[:, 0], cen_tgt[:, 1], s=s_bins, c="orange", alpha=0.4, label="target bins")
+    ax.scatter(cen_src[:, 0], cen_src[:, 1], s=s_bins, c="steelblue", alpha=0.4, label="source bins")
+    ax.quiver(
+        cen_src[idx, 0], cen_src[idx, 1],
+        disp_bin[idx, 0], disp_bin[idx, 1],
+        angles="xy", scale_units="xy", scale=arrow_scale,
+        width=arrow_width, color="red", alpha=0.6,
+    )
+    ax.set_aspect("equal")
+    ax.set_title("Grid OT match (bin centroids)")
+    ax.legend(markerscale=3, fontsize=8)
+
+    # -- Panel 2: Displacement field (cell-level) -----------------------------
+    ax = axes[1]
+    cell_disp = coords_aligned - coords_src
+    disp_mag = np.linalg.norm(cell_disp, axis=1)
+    sc = ax.scatter(
+        coords_src[:, 0], coords_src[:, 1],
+        c=disp_mag, s=s_points, alpha=alpha_points, cmap="viridis",
+    )
+    plt.colorbar(sc, ax=ax, label="displacement magnitude")
+    ax.set_aspect("equal")
+    ax.set_title("Displacement field (per cell)")
+
+    # -- Panel 3: Final overlay -----------------------------------------------
+    ax = axes[2]
+    ax.scatter(coords_tgt[:, 0], coords_tgt[:, 1], s=s_points, c="orange", alpha=alpha_points, label="target")
+    ax.scatter(coords_aligned[:, 0], coords_aligned[:, 1], s=s_points, c="steelblue", alpha=alpha_points, label="source aligned")
+    ax.set_aspect("equal")
+    ax.set_title("Final overlay")
+    ax.legend(markerscale=5, fontsize=8)
+
+    fig.tight_layout()
+    return fig
