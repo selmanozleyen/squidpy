@@ -6,8 +6,8 @@ from collections.abc import Callable, Iterable, Sequence
 from functools import partial
 from typing import Any, NamedTuple
 
+import joblib as jl
 import networkx as nx
-import numba.types as nt
 import numpy as np
 import pandas as pd
 from anndata import AnnData
@@ -20,7 +20,7 @@ from spatialdata import SpatialData
 from squidpy._constants._constants import Centrality
 from squidpy._constants._pkg_constants import Key
 from squidpy._docs import d, inject_docs
-from squidpy._utils import NDArrayA, Signal, SigQueue, _get_n_cores, parallelize
+from squidpy._utils import NDArrayA, _get_n_cores
 from squidpy.gr._utils import (
     _assert_categorical_obs,
     _assert_connectivity_key,
@@ -39,97 +39,42 @@ class NhoodEnrichmentResult(NamedTuple):
     counts: NDArray[np.number]  # NamedTuple inherits from tuple so cannot use 'count' as attribute name
 
 
-# data type aliases (both for numpy and numba should match)
-dt = nt.uint32
 ndt = np.uint32
-_template = """
-from __future__ import annotations
 
-from numba import njit, prange
-import numpy as np
 
-@njit(dt[:, :](dt[:], dt[:], dt[:]), parallel={parallel}, fastmath=True)
-def _nenrich_{n_cls}_{parallel}(indices: NDArrayA, indptr: NDArrayA, clustering: NDArrayA) -> np.ndarray:
-    '''
-    Count how many times clusters :math:`i` and :math:`j` are connected.
+def _count(adj: NDArrayA, clustering: NDArrayA, n_cls: int) -> NDArrayA:
+    """
+    Count how many times clusters ``i`` and ``j`` are connected.
+
+    Equivalent to ``one_hot.T @ adj @ one_hot`` where ``one_hot`` is the
+    indicator matrix for ``clustering``.
 
     Parameters
     ----------
-    indices
-        :attr:`scipy.sparse.csr_matrix.indices`.
-    indptr
-        :attr:`scipy.sparse.csr_matrix.indptr`.
+    adj
+        Sparse adjacency matrix of shape ``(n_cells, n_cells)``.
     clustering
-        Array of shape ``(n_cells,)`` containig cluster labels ranging from `0` to `n_clusters - 1` inclusive.
+        Array of shape ``(n_cells,)`` containing cluster labels
+        ranging from ``0`` to ``n_cls - 1`` inclusive.
+    n_cls
+        Number of clusters.
 
     Returns
     -------
     :class:`numpy.ndarray`
         Array of shape ``(n_clusters, n_clusters)`` containing the pairwise counts.
-    '''
-    res = np.zeros((indptr.shape[0] - 1, {n_cls}), dtype=ndt)
-
-    for i in prange(res.shape[0]):
-        xs, xe = indptr[i], indptr[i + 1]
-        cols = indices[xs:xe]
-        for c in cols:
-            res[i, clustering[c]] += 1
-    {init}
-    {loop}
-    {finalize}
-"""
-
-
-def _create_function(n_cls: int, parallel: bool = False) -> Callable[[NDArrayA, NDArrayA, NDArrayA], NDArrayA]:
     """
-    Create a :mod:`numba` function which counts the number of connections between clusters.
+    from scipy.sparse import csr_matrix
 
-    Parameters
-    ----------
-    n_cls
-        Number of clusters. We're assuming that cluster labels are `0`, `1`, ..., `n_cls - 1`.
-    parallel
-        Whether to enable :mod:`numba` parallelization.
-
-    Returns
-    -------
-    The aforementioned function.
-    """
     if n_cls <= 1:
         raise ValueError(f"Expected at least `2` clusters, found `{n_cls}`.")
 
-    rng = range(n_cls)
-    init = "".join(
-        f"""
-    g{i} = np.zeros(({n_cls},), dtype=ndt)"""
-        for i in rng
+    n = len(clustering)
+    one_hot = csr_matrix(
+        (np.ones(n, dtype=ndt), (np.arange(n), clustering)),
+        shape=(n, n_cls),
     )
-
-    loop_body = """
-        if cl == 0:
-            g0 += res[row]"""
-    loop_body = loop_body + "".join(
-        f"""
-        elif cl == {i}:
-            g{i} += res[row]"""
-        for i in range(1, n_cls)
-    )
-    loop = f"""
-    for row in prange(res.shape[0]):
-        cl = clustering[row]
-        {loop_body}
-        else:
-            assert False, "Unhandled case."
-    """
-    finalize = ", ".join(f"g{i}" for i in rng)
-    finalize = f"return np.stack(({finalize}))"  # must really be a tuple
-
-    fn_key = f"_nenrich_{n_cls}_{parallel}"
-    if fn_key not in globals():
-        template = _template.format(init=init, loop=loop, finalize=finalize, n_cls=n_cls, parallel=parallel)
-        exec(compile(template, "", "exec"), globals())
-
-    return globals()[fn_key]  # type: ignore[no-any-return]
+    return np.asarray((one_hot.T @ adj @ one_hot).todense(), dtype=ndt)
 
 
 @d.get_sections(base="nhood_ench", sections=["Parameters"])
@@ -140,11 +85,9 @@ def nhood_enrichment(
     library_key: str | None = None,
     connectivity_key: str | None = None,
     n_perms: int = 1000,
-    numba_parallel: bool = False,
     seed: int | None = None,
     copy: bool = False,
     n_jobs: int | None = None,
-    backend: str = "loky",
     show_progress_bar: bool = True,
 ) -> NhoodEnrichmentResult | None:
     """
@@ -157,10 +100,12 @@ def nhood_enrichment(
     %(library_key)s
     %(conn_key)s
     %(n_perms)s
-    %(numba_parallel)s
     %(seed)s
     %(copy)s
-    %(parallelize)s
+    n_jobs
+        Number of parallel threads for the permutation loop.
+    show_progress_bar
+        Whether to show a progress bar.
 
     Returns
     -------
@@ -189,30 +134,21 @@ def nhood_enrichment(
     else:
         libraries = None
 
-    indices, indptr = (adj.indices.astype(ndt), adj.indptr.astype(ndt))
     n_cls = len(clust_map)
-
-    _test = _create_function(n_cls, parallel=numba_parallel)
-    count = _test(indices, indptr, int_clust)
+    count = _count(adj, int_clust, n_cls)
 
     n_jobs = _get_n_cores(n_jobs)
     start = logg.info(f"Calculating neighborhood enrichment using `{n_jobs}` core(s)")
 
-    perms = parallelize(
-        _nhood_enrichment_helper,
-        collection=np.arange(n_perms).tolist(),
-        extractor=np.vstack,
-        n_jobs=n_jobs,
-        backend=backend,
-        show_progress_bar=show_progress_bar,
-    )(
-        callback=_test,
-        indices=indices,
-        indptr=indptr,
+    perms = _run_permutations(
+        adj=adj,
         int_clust=int_clust,
-        libraries=libraries,
         n_cls=n_cls,
+        n_perms=n_perms,
+        n_jobs=n_jobs,
         seed=seed,
+        libraries=libraries,
+        show_progress_bar=show_progress_bar,
     )
     zscore = (count - perms.mean(axis=0)) / perms.std(axis=0)
 
@@ -238,7 +174,6 @@ def centrality_scores(
     copy: bool = False,
     n_jobs: int | None = None,
     backend: str = "loky",
-    show_progress_bar: bool = False,
 ) -> pd.DataFrame | None:
     """
     Compute centrality scores per cluster or cell type.
@@ -259,7 +194,10 @@ def centrality_scores(
 
     %(conn_key)s
     %(copy)s
-    %(parallelize)s
+    n_jobs
+        Number of parallel jobs. See :class:`joblib.Parallel` for details.
+    backend
+        Parallelization backend. See :class:`joblib.Parallel` for available options.
 
     Returns
     -------
@@ -302,15 +240,11 @@ def centrality_scores(
 
     res_list = []
     for k, v in fun_dict.items():
-        df = parallelize(
-            _centrality_scores_helper,
-            collection=cat,
-            extractor=pd.concat,
-            n_jobs=n_jobs,
-            backend=backend,
-            show_progress_bar=show_progress_bar,
-        )(clusters=clusters, fun=v, method=k)
-        res_list.append(df)
+        scores = jl.Parallel(n_jobs=n_jobs, backend=backend)(
+            jl.delayed(_centrality_scores_helper)(c, clusters=clusters, fun=v)
+            for c in cat
+        )
+        res_list.append(pd.DataFrame(scores, columns=[k], index=cat))
 
     df = pd.concat(res_list, axis=1)
 
@@ -408,40 +342,82 @@ def _interaction_matrix(
 
 
 def _centrality_scores_helper(
-    cat: Iterable[Any],
+    cat: Any,
     clusters: Sequence[str],
     fun: Callable[..., float],
-    method: str,
-    queue: SigQueue | None = None,
-) -> pd.DataFrame:
-    res_list = []
-    for c in cat:
-        idx = np.where(clusters == c)[0]
-        res = fun(idx)
-        res_list.append(res)
+) -> float:
+    idx = np.where(clusters == cat)[0]
+    return fun(idx)
 
-        if queue is not None:
-            queue.put(Signal.UPDATE)
 
-    if queue is not None:
-        queue.put(Signal.FINISH)
+def _run_permutations(
+    adj: NDArrayA,
+    int_clust: NDArrayA,
+    n_cls: int,
+    n_perms: int,
+    n_jobs: int,
+    seed: int | None,
+    libraries: pd.Series[CategoricalDtype] | None,
+    show_progress_bar: bool,
+) -> NDArrayA:
+    """Run the permutation loop, optionally across multiple threads."""
+    from concurrent.futures import ThreadPoolExecutor
 
-    return pd.DataFrame(res_list, columns=[method], index=cat)
+    step = int(np.ceil(n_perms / n_jobs))
+    all_ixs = np.arange(n_perms)
+    chunks = [all_ixs[i * step : (i + 1) * step] for i in range(n_jobs)]
+    chunks = [c for c in chunks if len(c)]
+
+    pbar = _get_pbar(show_progress_bar, n_perms)
+
+    with ThreadPoolExecutor(max_workers=len(chunks)) as pool:
+        futures = [
+            pool.submit(
+                _nhood_enrichment_helper,
+                ixs=chunk,
+                adj=adj,
+                int_clust=int_clust,
+                n_cls=n_cls,
+                libraries=libraries,
+                seed=seed,
+                pbar=pbar,
+            )
+            for chunk in chunks
+        ]
+        results = [f.result() for f in futures]
+
+    if pbar is not None:
+        pbar.close()
+
+    return np.vstack(results)
+
+
+def _get_pbar(show: bool, total: int) -> Any:
+    """Create a tqdm progress bar if available and requested."""
+    if not show:
+        return None
+    try:
+        import ipywidgets  # noqa: F401
+        from tqdm.auto import tqdm
+    except ImportError:
+        try:
+            from tqdm.std import tqdm
+        except ImportError:
+            return None
+    return tqdm(total=total, unit="perm")
 
 
 def _nhood_enrichment_helper(
     ixs: NDArrayA,
-    callback: Callable[[NDArrayA, NDArrayA, NDArrayA], NDArrayA],
-    indices: NDArrayA,
-    indptr: NDArrayA,
+    adj: NDArrayA,
     int_clust: NDArrayA,
     libraries: pd.Series[CategoricalDtype] | None,
     n_cls: int,
     seed: int | None = None,
-    queue: SigQueue | None = None,
+    pbar: Any = None,
 ) -> NDArrayA:
     perms = np.empty((len(ixs), n_cls, n_cls), dtype=np.float64)
-    int_clust = int_clust.copy()  # threading
+    int_clust = int_clust.copy()
     rs = np.random.RandomState(seed=None if seed is None else seed + ixs[0])
 
     for i in range(len(ixs)):
@@ -449,12 +425,9 @@ def _nhood_enrichment_helper(
             int_clust = _shuffle_group(int_clust, libraries, rs)
         else:
             rs.shuffle(int_clust)
-        perms[i, ...] = callback(indices, indptr, int_clust)
+        perms[i, ...] = _count(adj, int_clust, n_cls)
 
-        if queue is not None:
-            queue.put(Signal.UPDATE)
-
-    if queue is not None:
-        queue.put(Signal.FINISH)
+        if pbar is not None:
+            pbar.update(1)
 
     return perms

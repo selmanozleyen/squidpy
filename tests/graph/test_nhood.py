@@ -30,11 +30,10 @@ class TestNhoodEnrichment:
 
         self._assert_common(adata)
 
-    @pytest.mark.parametrize("backend", ["threading", "multiprocessing", "loky"])
-    def test_parallel_works(self, adata: AnnData, backend: str):
+    def test_parallel_works(self, adata: AnnData):
         spatial_neighbors(adata)
 
-        nhood_enrichment(adata, cluster_key=_CK, n_jobs=2, n_perms=20, backend=backend)
+        nhood_enrichment(adata, cluster_key=_CK, n_jobs=2, n_perms=20)
 
         self._assert_common(adata)
 
