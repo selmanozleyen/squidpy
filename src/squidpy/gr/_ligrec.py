@@ -776,6 +776,7 @@ def _analysis(
 
     # (n_cells, n_genes)
     data = np.array(data[data.columns.difference(["clusters"])].values, dtype=np.float64, order="C")
+    root_seed = rng.integers(np.iinfo(np.int64).max)
     # all 3 should be C contiguous
     return parallelize(  # type: ignore[no-any-return]
         _analysis_helper,
@@ -792,7 +793,7 @@ def _analysis(
         interactions,
         interaction_clusters=interaction_clusters,
         clustering=clustering,
-        rng=rng,
+        root_seed=root_seed,
         numba_parallel=numba_parallel,
     )
 
@@ -805,7 +806,7 @@ def _analysis_helper(
     interactions: NDArrayA,
     interaction_clusters: NDArrayA,
     clustering: NDArrayA,
-    rng: np.random.Generator | None = None,
+    root_seed: int | None = None,
     numba_parallel: bool | None = None,
     queue: SigQueue | None = None,
 ) -> TempResult:
@@ -829,12 +830,9 @@ def _analysis_helper(
         Array of shape `(n_interaction_clusters, 2)`.
     clustering
         Array of shape `(n_cells,)` containing the original clustering.
-    rng
-        A :class:`numpy.random.Generator` used to derive a per-worker generator.
-        Each worker creates an independent stream via
-        ``default_rng([perms[0], entropy])`` using the parent's
-        :class:`numpy.random.SeedSequence` entropy, following NumPy's
-        recommended parallel seeding practice.
+    root_seed
+        Integer seed derived from the parent generator. Each worker creates
+        an independent stream via ``default_rng([perms[0], root_seed])``.
     numba_parallel
         Whether to use :func:`numba.prange` or not. If `None`, it's determined automatically.
     queue
@@ -849,11 +847,10 @@ def _analysis_helper(
         - `'pvalues'` - array of shape `(n_interactions, n_interaction_clusters)`  containing `np.sum(T0 > T)`
           where `T0` is the test statistic under null hypothesis and `T` is the true test statistic.
     """
-    if rng is None:
+    if root_seed is None:
         rng = np.random.default_rng()
     else:
-        entropy = rng.bit_generator.seed_seq.entropy
-        rng = np.random.default_rng([perms[0], entropy])
+        rng = np.random.default_rng([perms[0], root_seed])
 
     clustering = clustering.copy()
     n_cls = mean.shape[1]
