@@ -221,6 +221,7 @@ class PermutationTestABC(ABC):
     @d.get_sections(base="PT_test", sections=["Parameters"])
     @d.dedent
     @inject_docs(src=SOURCE, tgt=TARGET, fa=CorrAxis)
+    @deprecated_params({"numba_parallel": "1.10.0", "backend": "1.10.0"})
     def test(
         self,
         cluster_key: str,
@@ -536,6 +537,7 @@ class PermutationTest(PermutationTestABC):
 
 
 @d.dedent
+@deprecated_params({"numba_parallel": "1.10.0", "backend": "1.10.0"})
 def ligrec(
     adata: AnnData | SpatialData,
     cluster_key: str,
