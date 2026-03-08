@@ -318,7 +318,7 @@ class PermutationTestABC(ABC):
         n_jobs = max(1, min(n_jobs, n_perms))
         start = logg.info(
             f"Running `{n_perms}` permutations on `{len(interactions)}` interactions "
-            f"and `{len(clusters)}` cluster combinations using `{n_jobs}` thread(s)"
+            f"and `{len(clusters)}` cluster combinations using `{n_jobs}` core(s)"
         )
         res = _analysis(
             data,
