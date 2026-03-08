@@ -17,7 +17,7 @@ from tqdm.auto import tqdm
 
 from squidpy._constants._pkg_constants import Key
 from squidpy._docs import d, inject_docs
-from squidpy._utils import NDArrayA
+from squidpy._utils import NDArrayA, deprecated_params
 from squidpy.gr._utils import (
     _assert_connectivity_key,
     _assert_non_empty_sequence,
@@ -31,6 +31,7 @@ __all__ = ["sepal"]
 
 @d.dedent
 @inject_docs(key=Key.obsp.spatial_conn())
+@deprecated_params({"n_jobs": "1.10.0", "backend": "1.10.0", "show_progress_bar": "1.10.0"})
 def sepal(
     adata: AnnData | SpatialData,
     max_neighs: Literal[4, 6],

@@ -23,7 +23,7 @@ from tqdm.auto import tqdm
 from squidpy._constants._constants import ComplexPolicy, CorrAxis
 from squidpy._constants._pkg_constants import Key
 from squidpy._docs import d, inject_docs
-from squidpy._utils import NDArrayA
+from squidpy._utils import NDArrayA, deprecated_params
 from squidpy.gr._utils import (
     _assert_categorical_obs,
     _assert_positive,
