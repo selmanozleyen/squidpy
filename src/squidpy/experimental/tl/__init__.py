@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from squidpy.experimental.tl._align import align, apply_affine, apply_transform, plot_ot_alignment
+from squidpy.experimental.tl._align import align, apply_affine, apply_transform, plot_ot_alignment, score_alignment
 
-__all__ = ["align", "apply_affine", "apply_transform", "plot_ot_alignment"]
+__all__ = ["align", "apply_affine", "apply_transform", "plot_ot_alignment", "score_alignment"]

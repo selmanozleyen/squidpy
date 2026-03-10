@@ -219,6 +219,28 @@ def _choose_n_bins(n_points: int, max_bins: int = 5000) -> int:
     return max(10, int(np.sqrt(target)))
 
 
+def _warn_scale_mismatch(
+    coords_src: "NDArray[np.floating]",
+    coords_tgt: "NDArray[np.floating]",
+    *,
+    threshold: float = 10.0,
+) -> None:
+    """Warn if the coordinate extents of source and target differ greatly."""
+    ext_src = np.ptp(coords_src, axis=0).max()
+    ext_tgt = np.ptp(coords_tgt, axis=0).max()
+    if ext_src < 1e-12 or ext_tgt < 1e-12:
+        return
+    ratio = max(ext_src, ext_tgt) / min(ext_src, ext_tgt)
+    if ratio > threshold:
+        warnings.warn(
+            f"Spatial coordinate extents differ by {ratio:.0f}x "
+            f"(source extent ~ {ext_src:.1f}, target extent ~ {ext_tgt:.1f}). "
+            f"The two datasets may be in different coordinate systems. "
+            f"Consider pre-registering them or using LDDMM/STalign instead.",
+            stacklevel=4,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Backend: ott-jax  (point-to-point)
 # ---------------------------------------------------------------------------
@@ -349,6 +371,7 @@ def _align_points_ot(
     n_src, n_tgt = len(coords_src), len(coords_tgt)
 
     if verbose:
+        _warn_scale_mismatch(coords_src, coords_tgt)
         print(f"[ott] {n_src} source + {n_tgt} target = {n_src + n_tgt} cells")
         print("[ott] Solving Sinkhorn ...")
 
@@ -445,6 +468,9 @@ def _align_points_ot_binned(
     n_src = len(coords_src)
     n_tgt = len(coords_tgt)
 
+    if verbose:
+        _warn_scale_mismatch(coords_src, coords_tgt)
+
     # Resolve per-side grid resolutions.
     if n_bins is None:
         nb_src = _choose_n_bins(n_src)
@@ -457,13 +483,12 @@ def _align_points_ot_binned(
     grid_tgt = (nb_tgt, nb_tgt)
 
     # -- Step 1: Bin each point cloud at its own resolution -------------------
-    all_coords = np.vstack([coords_src, coords_tgt])
-    gmin = all_coords.min(axis=0)
-    gmax = all_coords.max(axis=0)
-    shared_range = ((gmin[0], gmax[0]), (gmin[1], gmax[1]))
-
-    cen_src, w_src, inv_src = _bin_points(coords_src, grid_src, range_xy=shared_range)
-    cen_tgt, w_tgt, inv_tgt = _bin_points(coords_tgt, grid_tgt, range_xy=shared_range)
+    # Each side gets its own bounding box so that datasets in different
+    # coordinate systems (e.g. normalised [0,1] vs pixel coords) are
+    # binned correctly.  The OT cost is computed on the resulting
+    # centroids which preserves each cloud's internal structure.
+    cen_src, w_src, inv_src = _bin_points(coords_src, grid_src)
+    cen_tgt, w_tgt, inv_tgt = _bin_points(coords_tgt, grid_tgt)
 
     nb_src_actual = len(cen_src)
     nb_tgt_actual = len(cen_tgt)
@@ -1222,8 +1247,42 @@ def align(
 
     Notes
     -----
-    Based on STalign [1]_ for image alignment and OTT-JAX [2]_ for
-    optimal-transport alignment.
+    **Choosing a backend.**  The OT and LDDMM backends solve different
+    problems and each has a natural domain of applicability.
+
+    *Optimal transport (ott-jax)* works well when:
+
+    - Source and target are in **compatible coordinate systems**
+      (similar spatial extent and units).  If they differ (e.g.
+      mm vs microns), rescale one before calling ``align()``.
+    - Tissue morphology is similar enough that spatial proximity
+      is meaningful.  Works across technologies (e.g. MERFISH to
+      Xenium) as long as coordinates are compatible.
+    - Cell counts are of similar magnitude.  Highly unbalanced
+      counts can make balanced OT degenerate; use ``n_bins`` to
+      mitigate.
+
+    OT alignment gives misleading results when:
+
+    - The two datasets come from unrelated tissues.  OT always
+      returns *some* transport plan -- it never reports "these
+      datasets cannot be aligned."
+    - Coordinate scales differ by orders of magnitude and have
+      not been rescaled.  Our Sinkhorn backend uses raw
+      coordinates, so the cost is dominated by the offset.
+
+    *LDDMM / STalign* is preferable when:
+
+    - Aligning points to a **reference image** (e.g. H&E
+      histology, atlas image).
+    - Tissue sections contain significant **non-linear
+      distortions** (tears, folds).
+    - Coordinate systems are incompatible and cannot easily be
+      pre-registered.
+    - You need a **smooth diffeomorphic transformation** rather
+      than a transport plan.
+
+    See [3]_ and [4]_ for benchmarking of alignment methods.
 
     References
     ----------
@@ -1232,6 +1291,11 @@ def align(
        *Nat. Commun.* 14, 8123 (2023).
     .. [2] Cuturi *et al.*, "Optimal Transport Tools (OTT): A JAX
        Toolbox for all things Wasserstein" (2022).
+    .. [3] Zeira *et al.*, "Alignment and integration of spatial
+       transcriptomics data", *Nat. Methods* 19, 567--575 (2022).
+    .. [4] Li *et al.*, "Benchmarking clustering, alignment, and
+       integration methods for spatial transcriptomics",
+       *Genome Biol.* 25, 212 (2024).
     """
     solve_kw: dict[str, Any] = dict(solve_kwargs or {})
     align_kw: dict[str, Any] = dict(align_kwargs or {})
@@ -1461,3 +1525,253 @@ def plot_ot_alignment(
 
     fig.tight_layout()
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Alignment quality scoring
+# ---------------------------------------------------------------------------
+
+def score_alignment(
+    adata_source: "AnnData",
+    adata_target: "AnnData",
+    *,
+    spatial_key_source: str = "spatial_aligned",
+    spatial_key_target: str = "spatial",
+    genes: list[str] | None = None,
+    k: int = 10,
+    radius: float | Literal["auto"] = "auto",
+    label_key: str | None = None,
+    verbose: bool = True,
+) -> dict[str, Any]:
+    """Score the quality of a spatial alignment.
+
+    Given aligned source coordinates and target coordinates, compute a
+    suite of metrics that quantify how well the two datasets overlap
+    spatially, transcriptomically, and (optionally) in terms of
+    cell-type labels.
+
+    Parameters
+    ----------
+    adata_source
+        Source AnnData *after* alignment (must contain aligned
+        coordinates in ``obsm[spatial_key_source]``).
+    adata_target
+        Target AnnData with spatial coordinates in
+        ``obsm[spatial_key_target]``.
+    spatial_key_source
+        ``obsm`` key for aligned source coordinates.
+    spatial_key_target
+        ``obsm`` key for target coordinates.
+    genes
+        Genes (column names in ``.var_names``) to use for gene
+        expression metrics.  ``None`` auto-detects the intersection
+        of source and target ``var_names``.  If there are no shared
+        genes the expression-based metrics are skipped.
+    k
+        Number of nearest neighbors for kNN-based metrics.
+    radius
+        Distance threshold for coverage.  Each target cell is
+        "covered" if at least one aligned source cell falls within
+        *radius*.
+
+        - ``"auto"`` (default) -- set to the median nearest-neighbor
+          distance among target cells (a natural length-scale of the
+          target tissue).
+        - ``float`` -- explicit distance in coordinate units.
+    label_key
+        Column in ``.obs`` that holds cell-type (or cluster) labels.
+        If present in both objects the label-transfer accuracy metric
+        is computed.
+    verbose
+        Print a summary table.
+
+    Returns
+    -------
+    A dictionary with the following keys (not all keys are always
+    present; expression and label metrics require shared genes /
+    labels):
+
+    - **coverage** (``float``, 0--1): fraction of target cells that
+      have at least one aligned source neighbor within *radius*.
+    - **mean_nn_dist** (``float``): mean nearest-neighbor distance
+      from each target cell to its closest aligned source cell.
+    - **median_nn_dist** (``float``): median of the same.
+    - **knn_mixing** (``float``, 0--1): for each target cell, the
+      fraction of its *k* nearest neighbours (in the combined
+      aligned-source + target point cloud) that come from the
+      *other* dataset.  Averaged over all target cells.  1 means
+      perfect mixing; 0 means complete segregation.
+    - **expr_knn_corr** (``float``, -1--1): for each aligned source
+      cell, find its *k* nearest target cells; average the target
+      expression over those neighbours; then compute the Pearson
+      correlation with the source cell's own expression.  Reported
+      as the median across source cells.
+    - **expr_knn_cosine** (``float``, 0--1): same procedure as above
+      but using cosine similarity instead of Pearson correlation.
+    - **label_transfer_accuracy** (``float``, 0--1): for each
+      aligned source cell, assign the majority cell-type label among
+      its *k* nearest target neighbours; compare to the source
+      cell's own label.  Fraction of correct assignments.
+    - **radius_used** (``float``): the *radius* that was used
+      (useful when ``radius="auto"``).
+    - **n_source** / **n_target** (``int``): cell counts.
+    - **n_genes_used** (``int``): number of shared genes used for
+      expression metrics.
+
+    Notes
+    -----
+    The **coverage** metric is inspired by the point-cloud
+    registration literature where "inlier ratio" measures the
+    fraction of points that find a match within a tolerance
+    [Pomerleau *et al.*, 2015].  The **knn_mixing** metric follows
+    the neighbourhood mixing score used in single-cell integration
+    benchmarks [Luecken *et al.*, Nat. Methods, 2022].  The
+    **label_transfer_accuracy** mirrors the label-transfer evaluation
+    used in PASTE [Zeira *et al.*, Nat. Methods, 2022] and the
+    spatial-transcriptomics benchmarking study [Li *et al.*, Genome
+    Biology, 2024].
+
+    Examples
+    --------
+    >>> scores = sq.experimental.tl.score_alignment(
+    ...     adata_source, adata_target,
+    ... )
+    >>> scores["coverage"]
+    0.94
+    """
+    from scipy.spatial import KDTree
+    from scipy.sparse import issparse
+
+    coords_src = np.asarray(adata_source.obsm[spatial_key_source], dtype=np.float64)
+    coords_tgt = np.asarray(adata_target.obsm[spatial_key_target], dtype=np.float64)
+
+    n_src = len(coords_src)
+    n_tgt = len(coords_tgt)
+
+    tree_src = KDTree(coords_src)
+    tree_tgt = KDTree(coords_tgt)
+
+    result: dict[str, Any] = {"n_source": n_src, "n_target": n_tgt}
+
+    # -- 1. Nearest-neighbor distances (target -> source) ---------------------
+    nn_dists, _ = tree_src.query(coords_tgt, k=1)
+    result["mean_nn_dist"] = float(np.mean(nn_dists))
+    result["median_nn_dist"] = float(np.median(nn_dists))
+
+    # -- 2. Coverage ----------------------------------------------------------
+    if radius == "auto":
+        tgt_self_dists, _ = tree_tgt.query(coords_tgt, k=2)
+        radius_val = float(np.median(tgt_self_dists[:, 1]))
+    else:
+        radius_val = float(radius)
+    result["radius_used"] = radius_val
+
+    covered = nn_dists <= radius_val
+    result["coverage"] = float(covered.mean())
+
+    # -- 3. kNN mixing score --------------------------------------------------
+    combined = np.vstack([coords_src, coords_tgt])
+    labels_mix = np.array(["source"] * n_src + ["target"] * n_tgt)
+    tree_combined = KDTree(combined)
+
+    # For each target cell, find k+1 neighbors (first hit is itself)
+    _, nn_idx = tree_combined.query(coords_tgt, k=k + 1)
+    # Offset of target cells in the combined array
+    tgt_offset = n_src
+    other_frac = np.zeros(n_tgt)
+    for i in range(n_tgt):
+        neighbors = nn_idx[i]
+        neighbors = neighbors[neighbors != (tgt_offset + i)][:k]
+        other_frac[i] = (labels_mix[neighbors] == "source").mean()
+    result["knn_mixing"] = float(other_frac.mean())
+
+    # -- 4. Gene-expression-based metrics -------------------------------------
+    if genes is not None:
+        shared_genes = [g for g in genes if g in adata_source.var_names and g in adata_target.var_names]
+    else:
+        shared_genes = sorted(set(adata_source.var_names) & set(adata_target.var_names))
+
+    result["n_genes_used"] = len(shared_genes)
+
+    if len(shared_genes) > 1:
+        X_src = adata_source[:, shared_genes].X
+        X_tgt = adata_target[:, shared_genes].X
+        if issparse(X_src):
+            X_src = X_src.toarray()
+        if issparse(X_tgt):
+            X_tgt = X_tgt.toarray()
+        X_src = np.asarray(X_src, dtype=np.float64)
+        X_tgt = np.asarray(X_tgt, dtype=np.float64)
+
+        _, nn_tgt_idx = tree_tgt.query(coords_src, k=k)
+        avg_tgt_expr = np.zeros_like(X_src)
+        for i in range(n_src):
+            avg_tgt_expr[i] = X_tgt[nn_tgt_idx[i]].mean(axis=0)
+
+        # Pearson correlation per source cell
+        def _rowwise_pearson(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+            A_c = A - A.mean(axis=1, keepdims=True)
+            B_c = B - B.mean(axis=1, keepdims=True)
+            num = (A_c * B_c).sum(axis=1)
+            denom = np.sqrt((A_c ** 2).sum(axis=1) * (B_c ** 2).sum(axis=1))
+            denom = np.where(denom > 1e-12, denom, 1.0)
+            return num / denom
+
+        pearson = _rowwise_pearson(X_src, avg_tgt_expr)
+        result["expr_knn_corr"] = float(np.nanmedian(pearson))
+
+        # Cosine similarity per source cell
+        def _rowwise_cosine(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+            num = (A * B).sum(axis=1)
+            denom = np.sqrt((A ** 2).sum(axis=1) * (B ** 2).sum(axis=1))
+            denom = np.where(denom > 1e-12, denom, 1.0)
+            return num / denom
+
+        cosine = _rowwise_cosine(X_src, avg_tgt_expr)
+        result["expr_knn_cosine"] = float(np.nanmedian(cosine))
+
+    # -- 5. Label transfer accuracy -------------------------------------------
+    if label_key is not None:
+        src_has = label_key in adata_source.obs.columns
+        tgt_has = label_key in adata_target.obs.columns
+        if src_has and tgt_has:
+            src_labels = np.asarray(adata_source.obs[label_key])
+            tgt_labels = np.asarray(adata_target.obs[label_key])
+
+            _, nn_tgt_for_labels = tree_tgt.query(coords_src, k=k)
+            correct = 0
+            for i in range(n_src):
+                neighbor_labels = tgt_labels[nn_tgt_for_labels[i]]
+                unique, counts = np.unique(neighbor_labels, return_counts=True)
+                predicted = unique[counts.argmax()]
+                if predicted == src_labels[i]:
+                    correct += 1
+            result["label_transfer_accuracy"] = correct / n_src
+        elif verbose:
+            missing = []
+            if not src_has:
+                missing.append("source")
+            if not tgt_has:
+                missing.append("target")
+            print(f"[score_alignment] label_key={label_key!r} not found in {', '.join(missing)} .obs; skipping label transfer metric")
+
+    # -- Summary --------------------------------------------------------------
+    if verbose:
+        print("[score_alignment] Alignment quality metrics:")
+        print(f"  n_source:            {n_src}")
+        print(f"  n_target:            {n_tgt}")
+        print(f"  radius_used:         {result['radius_used']:.4f}")
+        print(f"  coverage:            {result['coverage']:.4f}")
+        print(f"  mean_nn_dist:        {result['mean_nn_dist']:.4f}")
+        print(f"  median_nn_dist:      {result['median_nn_dist']:.4f}")
+        print(f"  knn_mixing (k={k}):   {result['knn_mixing']:.4f}")
+        if "expr_knn_corr" in result:
+            print(f"  expr_knn_corr:       {result['expr_knn_corr']:.4f}")
+            print(f"  expr_knn_cosine:     {result['expr_knn_cosine']:.4f}")
+        else:
+            g = result["n_genes_used"]
+            print(f"  (expression metrics skipped: {g} shared genes)")
+        if "label_transfer_accuracy" in result:
+            print(f"  label_transfer_acc:  {result['label_transfer_accuracy']:.4f}")
+
+    return result
