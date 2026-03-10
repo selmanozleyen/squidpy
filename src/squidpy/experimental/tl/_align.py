@@ -209,6 +209,7 @@ def _bin_points(
     return centroids, weights, inverse
 
 
+
 def _choose_n_bins(n_points: int, max_bins: int = 5000) -> int:
     """Pick a grid resolution for one point cloud.
 
@@ -373,9 +374,17 @@ def _align_points_ot(
     if verbose:
         _warn_scale_mismatch(coords_src, coords_tgt)
         print(f"[ott] {n_src} source + {n_tgt} target = {n_src + n_tgt} cells")
+
+    # Center both clouds so OT operates on shape differences only.
+    src_mean = coords_src.mean(axis=0)
+    tgt_mean = coords_tgt.mean(axis=0)
+    src_c = coords_src - src_mean
+    tgt_c = coords_tgt - tgt_mean
+
+    if verbose:
         print("[ott] Solving Sinkhorn ...")
 
-    ot_out = _solve_sinkhorn(coords_src, coords_tgt, verbose=verbose, **solve_kw)
+    ot_out = _solve_sinkhorn(src_c, tgt_c, verbose=verbose, **solve_kw)
     T = ot_out.matrix  # jax array (n_src, n_tgt)
 
     mode = align_kw.pop("mode", "warp")
@@ -386,22 +395,23 @@ def _align_points_ot(
     row_sums = jnp.where(row_sums > 1e-10, row_sums, 1.0)
     T_norm = T / row_sums[:, None]
 
-    tgt = jnp.asarray(coords_tgt)
+    tgt_j = jnp.asarray(tgt_c)
 
     if mode == "warp":
-        aligned_coords = np.asarray(T_norm @ tgt)
+        aligned_c = np.asarray(T_norm @ tgt_j)
     elif mode == "affine":
         from scipy.linalg import svd as _svd
 
-        tgt_mean = tgt.mean(axis=0)
-        out = np.asarray(T_norm @ (tgt - tgt_mean))
-        src_centered = coords_src - coords_src.mean(axis=0)
-        H = src_centered.T @ out
+        out = np.asarray(T_norm @ tgt_j)
+        H = src_c.T @ out
         U, _, Vt = _svd(H)
         R = Vt.T @ U.T
-        aligned_coords = (R @ src_centered.T).T + np.asarray(tgt_mean)
+        aligned_c = (R @ src_c.T).T
     else:
         raise ValueError(f"Unsupported alignment mode {mode!r}. Use 'warp' or 'affine'.")
+
+    # Shift back to target coordinate space.
+    aligned_coords = aligned_c + tgt_mean
 
     adata = adata_source.copy() if copy else adata_source
     adata.obsm[key_added] = aligned_coords
@@ -421,6 +431,90 @@ def _align_points_ot(
 # ---------------------------------------------------------------------------
 # Backend: ott-jax  (binned point-to-point for large data)
 # ---------------------------------------------------------------------------
+
+
+def prepare_bins(
+    adata_source: "AnnData",
+    adata_target: "AnnData",
+    *,
+    spatial_key: str = "spatial",
+    n_bins: int | tuple[int, int] | None = None,
+    verbose: bool = True,
+) -> dict[str, Any]:
+    """Compute spatial bins for source and target (without running OT).
+
+    This is the first stage of the binned OT alignment pipeline,
+    extracted so you can inspect and plot the bins before committing
+    to the full alignment.  The returned dictionary is stored in
+    ``adata_source.uns["spatial_alignment_diag"]`` so that
+    :func:`plot_ot_alignment` with ``panels=["bins"]`` can display
+    them immediately.
+
+    Parameters
+    ----------
+    adata_source / adata_target
+        AnnData objects with spatial coordinates in
+        ``obsm[spatial_key]``.
+    spatial_key
+        Key in ``obsm`` for the spatial coordinates.
+    n_bins
+        Grid resolution per axis.  ``None`` picks automatically.
+        An ``int`` uses the same grid for both.  A tuple
+        ``(src_bins, tgt_bins)`` sets each side independently.
+    verbose
+        Print summary.
+
+    Returns
+    -------
+    Dictionary with keys ``cen_src``, ``cen_tgt``, ``w_src``,
+    ``w_tgt``, ``src_mean``, ``tgt_mean``.  Also stored in
+    ``adata_source.uns["spatial_alignment_diag"]``.
+    """
+    coords_src = np.asarray(adata_source.obsm[spatial_key], dtype=np.float64)
+    coords_tgt = np.asarray(adata_target.obsm[spatial_key], dtype=np.float64)
+    n_src = len(coords_src)
+    n_tgt = len(coords_tgt)
+
+    src_mean = coords_src.mean(axis=0)
+    tgt_mean = coords_tgt.mean(axis=0)
+    src_c = coords_src - src_mean
+    tgt_c = coords_tgt - tgt_mean
+
+    if n_bins is None:
+        nb_src = _choose_n_bins(n_src)
+        nb_tgt = _choose_n_bins(n_tgt)
+    elif isinstance(n_bins, int):
+        nb_src = nb_tgt = n_bins
+    else:
+        nb_src, nb_tgt = n_bins
+    grid_src = (nb_src, nb_src)
+    grid_tgt = (nb_tgt, nb_tgt)
+
+    cen_src, w_src, _ = _bin_points(src_c, grid_src)
+    cen_tgt, w_tgt, _ = _bin_points(tgt_c, grid_tgt)
+
+    if verbose:
+        print(
+            f"[prepare] {n_src} source + {n_tgt} target cells"
+        )
+        print(
+            f"[prepare] Binned: {len(cen_src)} src (grid {grid_src[0]}x{grid_src[1]}) "
+            f"+ {len(cen_tgt)} tgt (grid {grid_tgt[0]}x{grid_tgt[1]})"
+        )
+
+    diag = {
+        "cen_src": cen_src,
+        "cen_tgt": cen_tgt,
+        "w_src": w_src,
+        "w_tgt": w_tgt,
+        "alive": np.ones(len(cen_src), dtype=bool),
+        "warped_centroids": cen_src.copy(),
+        "src_mean": src_mean,
+        "tgt_mean": tgt_mean,
+    }
+    adata_source.uns["spatial_alignment_diag"] = diag
+    return diag
+
 
 def _align_points_ot_binned(
     adata_source: "AnnData",
@@ -471,6 +565,13 @@ def _align_points_ot_binned(
     if verbose:
         _warn_scale_mismatch(coords_src, coords_tgt)
 
+    # Center both clouds so OT operates on shape differences only.
+    # The bulk translation is trivially added back at the end.
+    src_mean = coords_src.mean(axis=0)
+    tgt_mean = coords_tgt.mean(axis=0)
+    src_c = coords_src - src_mean
+    tgt_c = coords_tgt - tgt_mean
+
     # Resolve per-side grid resolutions.
     if n_bins is None:
         nb_src = _choose_n_bins(n_src)
@@ -482,24 +583,17 @@ def _align_points_ot_binned(
     grid_src = (nb_src, nb_src)
     grid_tgt = (nb_tgt, nb_tgt)
 
-    # -- Step 1: Bin each point cloud at its own resolution -------------------
-    # Each side gets its own bounding box so that datasets in different
-    # coordinate systems (e.g. normalised [0,1] vs pixel coords) are
-    # binned correctly.  The OT cost is computed on the resulting
-    # centroids which preserves each cloud's internal structure.
-    cen_src, w_src, inv_src = _bin_points(coords_src, grid_src)
-    cen_tgt, w_tgt, inv_tgt = _bin_points(coords_tgt, grid_tgt)
-
-    nb_src_actual = len(cen_src)
-    nb_tgt_actual = len(cen_tgt)
+    # -- Step 1: Bin each centered point cloud --------------------------------
+    cen_src, w_src, inv_src = _bin_points(src_c, grid_src)
+    cen_tgt, w_tgt, inv_tgt = _bin_points(tgt_c, grid_tgt)
 
     if verbose:
         print(
             f"[ott-binned] Original: {n_src} source + {n_tgt} target = {n_src + n_tgt} cells"
         )
         print(
-            f"[ott-binned] Binned:   {nb_src_actual} source bins (grid {grid_src[0]}x{grid_src[1]}) + "
-            f"{nb_tgt_actual} target bins (grid {grid_tgt[0]}x{grid_tgt[1]})"
+            f"[ott-binned] Binned:   {len(cen_src)} source bins (grid {grid_src[0]}x{grid_src[1]}) + "
+            f"{len(cen_tgt)} target bins (grid {grid_tgt[0]}x{grid_tgt[1]})"
         )
 
     # -- Step 2: Solve Sinkhorn with weighted marginals -----------------------
@@ -537,27 +631,26 @@ def _align_points_ot_binned(
         interp = RBFInterpolator(
             cen_src[alive], displacements[alive], kernel="thin_plate_spline",
         )
-        disp_all = interp(coords_src)
-        aligned_coords = coords_src + disp_all
+        disp_all = interp(src_c)
+        aligned_c = src_c + disp_all
     elif mode == "affine":
         from scipy.linalg import svd as _svd
 
-        tgt_mean = cen_tgt.mean(axis=0)
-        src_mean = cen_src[alive].mean(axis=0)
-        tgt_centered = cen_tgt - tgt_mean
-        out = np.asarray(T_norm[alive] @ jnp.asarray(tgt_centered))
-        src_centered = cen_src[alive] - src_mean
+        out = np.asarray(T_norm[alive] @ jnp.asarray(cen_tgt))
+        src_centered_alive = cen_src[alive]
         w_alive = w_src[alive]
-        H = (src_centered * w_alive[:, np.newaxis]).T @ out
+        H = (src_centered_alive * w_alive[:, np.newaxis]).T @ out
         U, _, Vt = _svd(H)
         R = Vt.T @ U.T
         if np.linalg.det(R) < 0:
             Vt[-1, :] *= -1
             R = Vt.T @ U.T
-        t = tgt_mean - R @ src_mean
-        aligned_coords = (R @ coords_src.T).T + t
+        aligned_c = (R @ src_c.T).T
     else:
         raise ValueError(f"Unsupported alignment mode {mode!r}. Use 'warp' or 'affine'.")
+
+    # Shift back to target coordinate space.
+    aligned_coords = aligned_c + tgt_mean
 
     # -- Store ----------------------------------------------------------------
     adata = adata_source.copy() if copy else adata_source
@@ -568,8 +661,8 @@ def _align_points_ot_binned(
         "binned": True,
         "grid_src": grid_src,
         "grid_tgt": grid_tgt,
-        "n_bins_src": nb_src_actual,
-        "n_bins_tgt": nb_tgt_actual,
+        "n_bins_src": len(cen_src),
+        "n_bins_tgt": len(cen_tgt),
         "spatial_key": spatial_key,
         "mode": mode,
     }
@@ -577,9 +670,12 @@ def _align_points_ot_binned(
         "cen_src": cen_src,
         "cen_tgt": cen_tgt,
         "warped_centroids": warped_centroids,
+        "T_norm": np.asarray(T_norm),
         "w_src": w_src,
         "w_tgt": w_tgt,
         "alive": alive,
+        "src_mean": src_mean,
+        "tgt_mean": tgt_mean,
     }
 
     if verbose:
@@ -1341,7 +1437,6 @@ def align(
                 )
 
         if use_ot:
-            # Decide whether to use the binned (fast) path.
             _AUTO_BIN_THRESHOLD = 50_000
             use_binning = False
             _n_bins = n_bins
@@ -1410,8 +1505,58 @@ def align(
 
 
 # ---------------------------------------------------------------------------
-# Diagnostic plot for binned OT alignment
+# Diagnostic plots for binned OT alignment
 # ---------------------------------------------------------------------------
+
+def _get_diag(adata_source: "AnnData") -> dict:
+    """Retrieve spatial_alignment_diag from adata, raising if absent."""
+    diag = adata_source.uns.get("spatial_alignment_diag")
+    if diag is None:
+        raise ValueError(
+            "No diagnostic data found. Re-run align() with the latest code "
+            "so that adata.uns['spatial_alignment_diag'] is populated."
+        )
+    return diag
+
+
+def _build_rbf_field(
+    diag: dict,
+    coords_src: "NDArray[np.floating]",
+    grid_res: int = 40,
+) -> tuple["NDArray", "NDArray", "NDArray", "NDArray"]:
+    """Evaluate the RBF displacement field on a regular grid.
+
+    Returns ``(X, Y, U, V)`` arrays for quiver / streamline plots.
+    """
+    from scipy.interpolate import RBFInterpolator
+
+    cen_src = diag["cen_src"]
+    warped = diag["warped_centroids"]
+    alive = diag["alive"]
+
+    displacements = (warped - cen_src)[alive]
+
+    interp = RBFInterpolator(
+        cen_src[alive], displacements, kernel="thin_plate_spline",
+    )
+
+    pts_alive = cen_src[alive]
+    xmin, ymin = pts_alive.min(axis=0)
+    xmax, ymax = pts_alive.max(axis=0)
+    buf = 0.05
+    rx = (xmax - xmin) * buf
+    ry = (ymax - ymin) * buf
+    xs = np.linspace(xmin - rx, xmax + rx, grid_res)
+    ys = np.linspace(ymin - ry, ymax + ry, grid_res)
+    X, Y = np.meshgrid(xs, ys)
+    pts = np.column_stack([X.ravel(), Y.ravel()])
+
+    D = interp(pts)
+    U = D[:, 0].reshape(X.shape)
+    V = D[:, 1].reshape(X.shape)
+
+    return X, Y, U, V
+
 
 def plot_ot_alignment(
     adata_source: "AnnData",
@@ -1419,26 +1564,57 @@ def plot_ot_alignment(
     *,
     spatial_key: str = "spatial",
     key_aligned: str = "spatial_aligned",
-    figsize: tuple[float, float] = (18, 6),
+    panels: tuple[str, ...] | list[str] | None = None,
+    figsize: tuple[float, float] | None = None,
     arrow_subsample: int | None = None,
     arrow_scale: float = 1.0,
     arrow_width: float = 0.002,
     s_points: float = 0.3,
     s_bins: float = 8,
     alpha_points: float = 0.15,
+    grid_res: int = 40,
+    stream_density: float = 1.5,
+    stream_linewidth: float | None = None,
+    cmap: str = "coolwarm",
+    matching_top_k: int = 3,
+    show: bool = True,
 ) -> Any:
-    """Three-panel diagnostic for binned OT alignment.
+    """Diagnostic visualisation for binned OT alignment.
 
-    Panel 1 -- **Grid OT match**: source bin centroids (blue) and their
-    OT-warped positions (red arrows) overlaid on target centroids (orange).
-    Shows where the transport plan *wants* to send each source bin before
-    any interpolation.
+    By default all six panels are shown.  Pass ``panels`` to select a
+    subset or reorder them.
 
-    Panel 2 -- **Displacement field**: quiver plot of the RBF-interpolated
-    displacement vectors evaluated at original source cell positions.
-
-    Panel 3 -- **Final overlay**: aligned source cells (blue) on top of
-    target cells (orange), same as the usual result plot.
+    Available panels
+    ----------------
+    ``"bins"``
+        **Bin / sample layout.**  Source points (blue) and target
+        points (orange) shown in separate subpanels.  Marker size is
+        proportional to bin mass (or uniform for subsampling).
+    ``"grid"``
+        **Grid-level OT transport plan.**  Source bin centroids (blue)
+        with arrows to their OT-warped positions, overlaid on target
+        centroids (orange).  Arrow colour encodes displacement
+        magnitude.  Centroid size encodes bin mass.
+    ``"matching"``
+        **OT matching candidates.**  For each alive source bin, lines
+        are drawn to its top-k target bins (by transport weight).
+        Line opacity/width encodes coupling strength.  Useful for
+        inspecting whether the OT plan makes spatial sense.
+    ``"quiver"``
+        **Displacement vector field on a regular grid.**  The RBF
+        interpolant learned from the bin-level OT displacements is
+        evaluated on a ``grid_res x grid_res`` lattice and displayed
+        as a quiver plot, analogous to RNA velocity fields.
+    ``"stream"``
+        **Streamlines of the displacement field.**  Same RBF
+        interpolant as ``"quiver"`` but rendered as streamlines with
+        line width proportional to displacement magnitude.
+    ``"magnitude"``
+        **Displacement magnitude heatmap.**  Filled contour of the
+        RBF displacement magnitude over the source domain.
+    ``"overlay"``
+        **Final overlay.**  Aligned source cells (blue) on top of
+        target cells (orange).
 
     Parameters
     ----------
@@ -1447,83 +1623,272 @@ def plot_ot_alignment(
         ``uns['spatial_alignment_diag']`` and ``obsm[key_aligned]``).
     adata_target
         Target AnnData.
+    panels
+        Which panels to show (default: all six).  Accepts any
+        combination of ``"grid"``, ``"matching"``, ``"quiver"``,
+        ``"stream"``, ``"magnitude"``, ``"overlay"``.
+    figsize
+        Overall figure size.  Defaults to ``(6*n_panels, 5)``.
     arrow_subsample
-        Show every *n*-th arrow to reduce clutter.  ``None`` shows all.
+        Show every *n*-th arrow to reduce clutter (``"grid"`` panel).
+        ``None`` shows all alive bins.
     arrow_scale, arrow_width
-        Passed to :func:`matplotlib.pyplot.quiver`.
+        Passed to :func:`matplotlib.pyplot.quiver` for the
+        ``"grid"`` and ``"quiver"`` panels.
     s_points
         Marker size for individual cells.
     s_bins
-        Marker size for bin centroids.
+        Base marker size for bin centroids (scaled by mass in the
+        ``"grid"`` panel).
     alpha_points
-        Alpha for individual cell scatter points.
+        Alpha for individual cell scatter.
+    grid_res
+        Number of grid points per axis for ``"quiver"``,
+        ``"stream"``, and ``"magnitude"`` panels.
+    stream_density
+        Streamline density for the ``"stream"`` panel.
+    stream_linewidth
+        If ``None`` (default), line width scales with displacement
+        magnitude.  Otherwise a fixed width.
+    cmap
+        Colour map for displacement magnitude (used in ``"grid"``,
+        ``"quiver"``, ``"magnitude"``).
+    matching_top_k
+        Number of top target matches to draw per source bin in the
+        ``"matching"`` panel.  Default 3.
+    show
+        Call ``plt.show()`` at the end.  Set ``False`` for further
+        customisation.
 
     Returns
     -------
     ``matplotlib.figure.Figure``
     """
     import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize
 
-    diag = adata_source.uns.get("spatial_alignment_diag")
-    if diag is None:
+    ALL_PANELS = ("quiver", "stream", "bins", "overlay")
+    if panels is None:
+        panels = ALL_PANELS
+    else:
+        panels = tuple(panels)
+    unknown = set(panels) - set(ALL_PANELS)
+    if unknown:
         raise ValueError(
-            "No diagnostic data found. Re-run align() with the latest code "
-            "so that adata.uns['spatial_alignment_diag'] is populated."
+            f"Unknown panel(s): {unknown}. Choose from {ALL_PANELS}."
         )
+    n = len(panels)
+    if n == 0:
+        raise ValueError("At least one panel must be specified.")
 
+    diag = _get_diag(adata_source)
     cen_src = diag["cen_src"]
     cen_tgt = diag["cen_tgt"]
     warped = diag["warped_centroids"]
     alive = diag["alive"]
+    w_src = diag["w_src"]
+    w_tgt = diag["w_tgt"]
+    T_norm = diag.get("T_norm")
 
-    coords_src = np.asarray(adata_source.obsm[spatial_key])
-    coords_tgt = np.asarray(adata_target.obsm[spatial_key])
+    coords_src_raw = np.asarray(adata_source.obsm[spatial_key])
+    coords_tgt_raw = np.asarray(adata_target.obsm[spatial_key])
     coords_aligned = np.asarray(adata_source.obsm[key_aligned])
 
-    disp_bin = warped - cen_src  # per-bin displacement from OT
+    src_mean = diag.get("src_mean", coords_src_raw.mean(axis=0))
+    src_c = coords_src_raw - src_mean
 
-    # Subsample arrows for readability
-    idx = np.where(alive)[0]
+    disp_bin = warped - cen_src
+    disp_bin_mag = np.linalg.norm(disp_bin, axis=1)
+
+    need_field = bool({"quiver", "stream", "magnitude"} & set(panels))
+    if need_field:
+        X, Y, U, V = _build_rbf_field(
+            diag, src_c, grid_res=grid_res,
+        )
+        mag_grid = np.sqrt(U**2 + V**2)
+
+    # "bins" panel gets 2 columns; everything else gets 1.
+    col_widths = [2 if p == "bins" else 1 for p in panels]
+    total_cols = sum(col_widths)
+    if figsize is None:
+        figsize = (6 * total_cols, 5)
+    fig = plt.figure(figsize=figsize)
+    gs = fig.add_gridspec(1, total_cols)
+    axes = []
+    col = 0
+    for w in col_widths:
+        axes.append(fig.add_subplot(gs[0, col:col + w]))
+        col += w
+
+    alive_idx = np.where(alive)[0]
     if arrow_subsample is not None and arrow_subsample > 1:
-        idx = idx[::arrow_subsample]
+        sub_idx = alive_idx[::arrow_subsample]
+    else:
+        sub_idx = alive_idx
 
-    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    norm = Normalize(vmin=disp_bin_mag[alive].min(),
+                     vmax=disp_bin_mag[alive].max())
 
-    # -- Panel 1: Grid OT match (bin-level) -----------------------------------
-    ax = axes[0]
-    ax.scatter(cen_tgt[:, 0], cen_tgt[:, 1], s=s_bins, c="orange", alpha=0.4, label="target bins")
-    ax.scatter(cen_src[:, 0], cen_src[:, 1], s=s_bins, c="steelblue", alpha=0.4, label="source bins")
-    ax.quiver(
-        cen_src[idx, 0], cen_src[idx, 1],
-        disp_bin[idx, 0], disp_bin[idx, 1],
-        angles="xy", scale_units="xy", scale=arrow_scale,
-        width=arrow_width, color="red", alpha=0.6,
-    )
-    ax.set_aspect("equal")
-    ax.set_title("Grid OT match (bin centroids)")
-    ax.legend(markerscale=3, fontsize=8)
+    for ax, panel in zip(axes, panels, strict=True):
 
-    # -- Panel 2: Displacement field (cell-level) -----------------------------
-    ax = axes[1]
-    cell_disp = coords_aligned - coords_src
-    disp_mag = np.linalg.norm(cell_disp, axis=1)
-    sc = ax.scatter(
-        coords_src[:, 0], coords_src[:, 1],
-        c=disp_mag, s=s_points, alpha=alpha_points, cmap="viridis",
-    )
-    plt.colorbar(sc, ax=ax, label="displacement magnitude")
-    ax.set_aspect("equal")
-    ax.set_title("Displacement field (per cell)")
+        if panel == "bins":
+            mass_src = w_src / w_src.max() * s_bins * 5
+            mass_tgt = w_tgt / w_tgt.max() * s_bins * 5
 
-    # -- Panel 3: Final overlay -----------------------------------------------
-    ax = axes[2]
-    ax.scatter(coords_tgt[:, 0], coords_tgt[:, 1], s=s_points, c="orange", alpha=alpha_points, label="target")
-    ax.scatter(coords_aligned[:, 0], coords_aligned[:, 1], s=s_points, c="steelblue", alpha=alpha_points, label="source aligned")
-    ax.set_aspect("equal")
-    ax.set_title("Final overlay")
-    ax.legend(markerscale=5, fontsize=8)
+            pos = ax.get_position()
+            ax.set_visible(False)
+            mid = (pos.x0 + pos.x1) / 2
+            gap = (pos.x1 - pos.x0) * 0.04
+            ax_s = fig.add_axes([pos.x0, pos.y0,
+                                 mid - pos.x0 - gap, pos.y1 - pos.y0])
+            ax_t = fig.add_axes([mid + gap, pos.y0,
+                                 pos.x1 - mid - gap, pos.y1 - pos.y0])
+
+            ax_s.scatter(
+                src_c[:, 0], src_c[:, 1],
+                s=s_points * 0.3, c="grey", alpha=0.05,
+            )
+            ax_s.scatter(
+                cen_src[:, 0], cen_src[:, 1],
+                s=mass_src, c="steelblue", alpha=0.5,
+            )
+            ax_s.set_aspect("equal")
+            ax_s.set_title(f"Source bins ({len(cen_src)})")
+
+            ax_t.scatter(
+                cen_tgt[:, 0], cen_tgt[:, 1],
+                s=mass_tgt, c="orange", alpha=0.5,
+            )
+            ax_t.set_aspect("equal")
+            ax_t.set_title(f"Target bins ({len(cen_tgt)})")
+            continue
+
+        elif panel == "grid":
+            mass_scale = w_src / w_src.max() * s_bins * 5
+            ax.scatter(
+                cen_tgt[:, 0], cen_tgt[:, 1],
+                s=s_bins, c="orange", alpha=0.35, label="target bins",
+            )
+            ax.scatter(
+                cen_src[alive, 0], cen_src[alive, 1],
+                s=mass_scale[alive], c="steelblue", alpha=0.4,
+                label="source bins",
+            )
+            q = ax.quiver(
+                cen_src[sub_idx, 0], cen_src[sub_idx, 1],
+                disp_bin[sub_idx, 0], disp_bin[sub_idx, 1],
+                disp_bin_mag[sub_idx],
+                angles="xy", scale_units="xy", scale=arrow_scale,
+                width=arrow_width, cmap=cmap, norm=norm, alpha=0.8,
+            )
+            plt.colorbar(q, ax=ax, label="displacement", shrink=0.7)
+            ax.legend(markerscale=3, fontsize=7, loc="best")
+            ax.set_title("Grid-level OT transport")
+
+        elif panel == "matching":
+            if T_norm is None:
+                ax.text(0.5, 0.5, "T_norm not stored.\nRe-run align().",
+                        ha="center", va="center", transform=ax.transAxes)
+                ax.set_title("OT matching (no data)")
+            else:
+                from matplotlib.collections import LineCollection
+                lines = []
+                weights = []
+                for i in alive_idx[::max(1, len(alive_idx) // 200)]:
+                    row = T_norm[i]
+                    top_j = np.argsort(row)[-matching_top_k:]
+                    for j in top_j:
+                        if row[j] > 1e-6:
+                            lines.append([cen_src[i], cen_tgt[j]])
+                            weights.append(float(row[j]))
+                if lines:
+                    weights = np.array(weights)
+                    weights = weights / (weights.max() + 1e-12)
+                    lc = LineCollection(
+                        lines, linewidths=0.3 + 1.5 * weights,
+                        colors=plt.cm.viridis(weights), alpha=0.6,
+                    )
+                    ax.add_collection(lc)
+                ax.scatter(
+                    cen_src[alive, 0], cen_src[alive, 1],
+                    s=s_bins, c="steelblue", alpha=0.5, label="source",
+                )
+                ax.scatter(
+                    cen_tgt[:, 0], cen_tgt[:, 1],
+                    s=s_bins, c="orange", alpha=0.5, label="target",
+                )
+                ax.autoscale_view()
+                ax.legend(markerscale=3, fontsize=7, loc="best")
+                ax.set_title(f"OT matching (top-{matching_top_k})")
+
+        elif panel == "quiver":
+            Xf, Yf = X.ravel(), Y.ravel()
+            Uf, Vf = U.ravel(), V.ravel()
+            Mf = np.sqrt(Uf**2 + Vf**2)
+            q = ax.quiver(
+                Xf, Yf, Uf, Vf, Mf,
+                angles="xy", scale_units="xy", scale=arrow_scale,
+                width=arrow_width * 1.5, cmap=cmap, alpha=0.85,
+            )
+            ax.scatter(
+                src_c[:, 0], src_c[:, 1],
+                s=s_points * 0.3, c="grey", alpha=0.08,
+            )
+            plt.colorbar(q, ax=ax, label="displacement", shrink=0.7)
+            ax.set_title("Displacement field (quiver)")
+
+        elif panel == "stream":
+            speed = mag_grid.copy()
+            if stream_linewidth is None:
+                maxs = speed.max() + 1e-12
+                lw = 0.5 + 2.5 * speed / maxs
+            else:
+                lw = stream_linewidth
+            strm = ax.streamplot(
+                X[0, :], Y[:, 0], U, V,
+                color=speed, cmap=cmap, density=stream_density,
+                linewidth=lw, arrowsize=1.2,
+            )
+            ax.scatter(
+                src_c[:, 0], src_c[:, 1],
+                s=s_points * 0.3, c="grey", alpha=0.08,
+            )
+            plt.colorbar(strm.lines, ax=ax, label="displacement", shrink=0.7)
+            ax.set_title("Displacement streamlines")
+
+        elif panel == "magnitude":
+            vmin = mag_grid.min()
+            vmax = mag_grid.max()
+            levels = np.linspace(vmin, vmax, 30)
+            cf = ax.contourf(X, Y, mag_grid, levels=levels, cmap=cmap,
+                             alpha=0.85, extend="both")
+            ax.scatter(
+                src_c[:, 0], src_c[:, 1],
+                s=s_points * 0.3, c="k", alpha=0.06,
+            )
+            plt.colorbar(cf, ax=ax, label="displacement magnitude",
+                         shrink=0.7)
+            ax.set_title("Displacement magnitude")
+
+        elif panel == "overlay":
+            ax.scatter(
+                coords_tgt_raw[:, 0], coords_tgt_raw[:, 1],
+                s=s_points, c="orange", alpha=alpha_points,
+                label="target",
+            )
+            ax.scatter(
+                coords_aligned[:, 0], coords_aligned[:, 1],
+                s=s_points, c="steelblue", alpha=alpha_points,
+                label="aligned source",
+            )
+            ax.legend(markerscale=5, fontsize=7, loc="best")
+            ax.set_title("Final overlay")
+
+        ax.set_aspect("equal")
 
     fig.tight_layout()
+    if show:
+        plt.show()
     return fig
 
 
@@ -1540,15 +1905,13 @@ def score_alignment(
     genes: list[str] | None = None,
     k: int = 10,
     radius: float | Literal["auto"] = "auto",
-    label_key: str | None = None,
     verbose: bool = True,
 ) -> dict[str, Any]:
     """Score the quality of a spatial alignment.
 
     Given aligned source coordinates and target coordinates, compute a
     suite of metrics that quantify how well the two datasets overlap
-    spatially, transcriptomically, and (optionally) in terms of
-    cell-type labels.
+    spatially and transcriptomically.
 
     Parameters
     ----------
@@ -1578,40 +1941,28 @@ def score_alignment(
           distance among target cells (a natural length-scale of the
           target tissue).
         - ``float`` -- explicit distance in coordinate units.
-    label_key
-        Column in ``.obs`` that holds cell-type (or cluster) labels.
-        If present in both objects the label-transfer accuracy metric
-        is computed.
     verbose
         Print a summary table.
 
     Returns
     -------
     A dictionary with the following keys (not all keys are always
-    present; expression and label metrics require shared genes /
-    labels):
+    present; expression metrics require shared genes):
 
     - **coverage** (``float``, 0--1): fraction of target cells that
       have at least one aligned source neighbor within *radius*.
     - **mean_nn_dist** (``float``): mean nearest-neighbor distance
       from each target cell to its closest aligned source cell.
     - **median_nn_dist** (``float``): median of the same.
-    - **knn_mixing** (``float``, 0--1): for each target cell, the
-      fraction of its *k* nearest neighbours (in the combined
-      aligned-source + target point cloud) that come from the
-      *other* dataset.  Averaged over all target cells.  1 means
-      perfect mixing; 0 means complete segregation.
     - **expr_knn_corr** (``float``, -1--1): for each aligned source
       cell, find its *k* nearest target cells; average the target
       expression over those neighbours; then compute the Pearson
       correlation with the source cell's own expression.  Reported
-      as the median across source cells.
+      as the median across source cells.  Expression is
+      library-size-normalized and log1p-transformed before
+      comparison.
     - **expr_knn_cosine** (``float``, 0--1): same procedure as above
       but using cosine similarity instead of Pearson correlation.
-    - **label_transfer_accuracy** (``float``, 0--1): for each
-      aligned source cell, assign the majority cell-type label among
-      its *k* nearest target neighbours; compare to the source
-      cell's own label.  Fraction of correct assignments.
     - **radius_used** (``float``): the *radius* that was used
       (useful when ``radius="auto"``).
     - **n_source** / **n_target** (``int``): cell counts.
@@ -1623,13 +1974,7 @@ def score_alignment(
     The **coverage** metric is inspired by the point-cloud
     registration literature where "inlier ratio" measures the
     fraction of points that find a match within a tolerance
-    [Pomerleau *et al.*, 2015].  The **knn_mixing** metric follows
-    the neighbourhood mixing score used in single-cell integration
-    benchmarks [Luecken *et al.*, Nat. Methods, 2022].  The
-    **label_transfer_accuracy** mirrors the label-transfer evaluation
-    used in PASTE [Zeira *et al.*, Nat. Methods, 2022] and the
-    spatial-transcriptomics benchmarking study [Li *et al.*, Genome
-    Biology, 2024].
+    [Pomerleau *et al.*, 2015].
 
     Examples
     --------
@@ -1669,23 +2014,7 @@ def score_alignment(
     covered = nn_dists <= radius_val
     result["coverage"] = float(covered.mean())
 
-    # -- 3. kNN mixing score --------------------------------------------------
-    combined = np.vstack([coords_src, coords_tgt])
-    labels_mix = np.array(["source"] * n_src + ["target"] * n_tgt)
-    tree_combined = KDTree(combined)
-
-    # For each target cell, find k+1 neighbors (first hit is itself)
-    _, nn_idx = tree_combined.query(coords_tgt, k=k + 1)
-    # Offset of target cells in the combined array
-    tgt_offset = n_src
-    other_frac = np.zeros(n_tgt)
-    for i in range(n_tgt):
-        neighbors = nn_idx[i]
-        neighbors = neighbors[neighbors != (tgt_offset + i)][:k]
-        other_frac[i] = (labels_mix[neighbors] == "source").mean()
-    result["knn_mixing"] = float(other_frac.mean())
-
-    # -- 4. Gene-expression-based metrics -------------------------------------
+    # -- 3. Gene-expression-based metrics -------------------------------------
     if genes is not None:
         shared_genes = [g for g in genes if g in adata_source.var_names and g in adata_target.var_names]
     else:
@@ -1702,6 +2031,17 @@ def score_alignment(
             X_tgt = X_tgt.toarray()
         X_src = np.asarray(X_src, dtype=np.float64)
         X_tgt = np.asarray(X_tgt, dtype=np.float64)
+
+        # Library-size normalize + log1p so correlation/cosine are
+        # not dominated by a few highly expressed genes.
+        def _lognorm(X: np.ndarray) -> np.ndarray:
+            totals = X.sum(axis=1, keepdims=True)
+            totals = np.where(totals > 0, totals, 1.0)
+            median_total = np.median(totals[totals > 1.0]) if (totals > 1.0).any() else 1.0
+            return np.log1p(X / totals * median_total)
+
+        X_src = _lognorm(X_src)
+        X_tgt = _lognorm(X_tgt)
 
         _, nn_tgt_idx = tree_tgt.query(coords_src, k=k)
         avg_tgt_expr = np.zeros_like(X_src)
@@ -1730,31 +2070,6 @@ def score_alignment(
         cosine = _rowwise_cosine(X_src, avg_tgt_expr)
         result["expr_knn_cosine"] = float(np.nanmedian(cosine))
 
-    # -- 5. Label transfer accuracy -------------------------------------------
-    if label_key is not None:
-        src_has = label_key in adata_source.obs.columns
-        tgt_has = label_key in adata_target.obs.columns
-        if src_has and tgt_has:
-            src_labels = np.asarray(adata_source.obs[label_key])
-            tgt_labels = np.asarray(adata_target.obs[label_key])
-
-            _, nn_tgt_for_labels = tree_tgt.query(coords_src, k=k)
-            correct = 0
-            for i in range(n_src):
-                neighbor_labels = tgt_labels[nn_tgt_for_labels[i]]
-                unique, counts = np.unique(neighbor_labels, return_counts=True)
-                predicted = unique[counts.argmax()]
-                if predicted == src_labels[i]:
-                    correct += 1
-            result["label_transfer_accuracy"] = correct / n_src
-        elif verbose:
-            missing = []
-            if not src_has:
-                missing.append("source")
-            if not tgt_has:
-                missing.append("target")
-            print(f"[score_alignment] label_key={label_key!r} not found in {', '.join(missing)} .obs; skipping label transfer metric")
-
     # -- Summary --------------------------------------------------------------
     if verbose:
         print("[score_alignment] Alignment quality metrics:")
@@ -1764,14 +2079,11 @@ def score_alignment(
         print(f"  coverage:            {result['coverage']:.4f}")
         print(f"  mean_nn_dist:        {result['mean_nn_dist']:.4f}")
         print(f"  median_nn_dist:      {result['median_nn_dist']:.4f}")
-        print(f"  knn_mixing (k={k}):   {result['knn_mixing']:.4f}")
         if "expr_knn_corr" in result:
             print(f"  expr_knn_corr:       {result['expr_knn_corr']:.4f}")
             print(f"  expr_knn_cosine:     {result['expr_knn_cosine']:.4f}")
         else:
             g = result["n_genes_used"]
             print(f"  (expression metrics skipped: {g} shared genes)")
-        if "label_transfer_accuracy" in result:
-            print(f"  label_transfer_acc:  {result['label_transfer_accuracy']:.4f}")
 
     return result
