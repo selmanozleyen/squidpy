@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Any, NamedTuple
 
 import fast_array_utils as fau # noqa: F401
@@ -21,7 +21,7 @@ from spatialdata import SpatialData
 from squidpy._constants._constants import Centrality
 from squidpy._constants._pkg_constants import Key
 from squidpy._docs import d, inject_docs
-from squidpy._utils import NDArrayA, Signal, SigQueue, _get_n_cores, deprecated_params, parallelize
+from squidpy._utils import NDArrayA, Signal, SigQueue, _get_n_cores, deprecated_params, parallelize, thread_map
 from squidpy._validators import assert_positive
 from squidpy.gr._utils import (
     _assert_categorical_obs,
@@ -311,14 +311,8 @@ def centrality_scores(
             raise NotImplementedError(f"Centrality `{c}` is not yet implemented.")
 
     results: dict[str, list[float]] = {}
-    if n_workers > 1:
-        with ThreadPoolExecutor(max_workers=n_workers) as pool:
-            for c in centralities:
-                futures = [pool.submit(_score_one, c, idx) for idx in indices]
-                results[c.s] = [f.result() for f in futures]
-    else:
-        for c in centralities:
-            results[c.s] = [_score_one(c, idx) for idx in indices]
+    for c in centralities:
+        results[c.s] = thread_map(partial(_score_one, c), indices, n_jobs=n_workers)
 
     df = pd.DataFrame(results, index=cat)
 
