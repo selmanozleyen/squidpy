@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
-from functools import partial
+from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, NamedTuple
 
-import networkx as nx
+import fast_array_utils as fau # noqa: F401
 import numba.types as nt
 import numpy as np
 import pandas as pd
@@ -15,12 +15,13 @@ from numba import njit
 from numpy.typing import NDArray
 from pandas import CategoricalDtype
 from scanpy import logging as logg
+from scipy.sparse import spmatrix
 from spatialdata import SpatialData
 
 from squidpy._constants._constants import Centrality
 from squidpy._constants._pkg_constants import Key
 from squidpy._docs import d, inject_docs
-from squidpy._utils import NDArrayA, Signal, SigQueue, _get_n_cores, parallelize
+from squidpy._utils import NDArrayA, Signal, SigQueue, _get_n_cores, deprecated_params, parallelize
 from squidpy._validators import assert_positive
 from squidpy.gr._utils import (
     _assert_categorical_obs,
@@ -230,6 +231,7 @@ def nhood_enrichment(
 
 @d.dedent
 @inject_docs(c=Centrality)
+@deprecated_params({"backend": "1.10.0", "show_progress_bar": "1.10.0"})
 def centrality_scores(
     adata: AnnData | SpatialData,
     cluster_key: str,
@@ -237,8 +239,6 @@ def centrality_scores(
     connectivity_key: str | None = None,
     copy: bool = False,
     n_jobs: int | None = None,
-    backend: str = "loky",
-    show_progress_bar: bool = False,
 ) -> pd.DataFrame | None:
     """
     Compute centrality scores per cluster or cell type.
@@ -250,7 +250,7 @@ def centrality_scores(
     %(adata)s
     %(cluster_key)s
     score
-        Centrality measures as described in :mod:`networkx.algorithms.centrality` :cite:`networkx`.
+        Centrality measures.
         If `None`, use all the options below. Valid options are:
 
             - `{c.CLOSENESS.s!r}` - measure of how close the group is to other nodes.
@@ -259,7 +259,9 @@ def centrality_scores(
 
     %(conn_key)s
     %(copy)s
-    %(parallelize)s
+    n_jobs
+        Number of threads to use. If `None` or ``1``, run sequentially.
+        The speedup is most significant for closeness centrality on large graphs.
 
     Returns
     -------
@@ -281,38 +283,44 @@ def centrality_scores(
 
     centralities = [Centrality(c) for c in centrality]
 
-    graph = nx.Graph(adata.obsp[connectivity_key])
+    adj = adata.obsp[connectivity_key]
+    adj_bin = (adj > 0).astype(np.float32)
+    adj_bin.setdiag(0)
+    adj_bin.eliminate_zeros()
 
     cat = adata.obs[cluster_key].cat.categories.values
     clusters = adata.obs[cluster_key].values
+    indices = [np.where(clusters == cl)[0] for cl in cat]
 
-    fun_dict = {}
-    for c in centralities:
+    n_workers = _get_n_cores(n_jobs)
+    start = logg.info(f"Calculating centralities `{centralities}` using `{n_workers}` thread(s)")
+
+    clustering_coeffs: NDArrayA | None = None
+    if any(c == Centrality.CLUSTERING for c in centralities):
+        clustering_coeffs = _clustering_coefficients(adj_bin)
+
+    def _score_one(c: Centrality, idx: NDArrayA) -> float:
         if c == Centrality.CLOSENESS:
-            fun_dict[c.s] = partial(nx.algorithms.centrality.group_closeness_centrality, graph)
+            return _group_closeness_centrality(adj_bin, idx)
         elif c == Centrality.DEGREE:
-            fun_dict[c.s] = partial(nx.algorithms.centrality.group_degree_centrality, graph)
+            return _group_degree_centrality(adj_bin, idx)
         elif c == Centrality.CLUSTERING:
-            fun_dict[c.s] = partial(nx.algorithms.cluster.average_clustering, graph)
+            assert clustering_coeffs is not None
+            return _average_clustering(clustering_coeffs, idx)
         else:
             raise NotImplementedError(f"Centrality `{c}` is not yet implemented.")
 
-    n_jobs = _get_n_cores(n_jobs)
-    start = logg.info(f"Calculating centralities `{centralities}` using `{n_jobs}` core(s)")
+    results: dict[str, list[float]] = {}
+    if n_workers > 1:
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            for c in centralities:
+                futures = [pool.submit(_score_one, c, idx) for idx in indices]
+                results[c.s] = [f.result() for f in futures]
+    else:
+        for c in centralities:
+            results[c.s] = [_score_one(c, idx) for idx in indices]
 
-    res_list = []
-    for k, v in fun_dict.items():
-        df = parallelize(
-            _centrality_scores_helper,
-            collection=cat,
-            extractor=pd.concat,
-            n_jobs=n_jobs,
-            backend=backend,
-            show_progress_bar=show_progress_bar,
-        )(clusters=clusters, fun=v, method=k)
-        res_list.append(df)
-
-    df = pd.concat(res_list, axis=1)
+    df = pd.DataFrame(results, index=cat)
 
     if copy:
         return df
@@ -406,27 +414,90 @@ def _interaction_matrix(
             output[cur_row, cur_col] += val
     return output
 
+@njit(nogil=True)
+def _group_closeness_centrality(g: spmatrix, idx: NDArrayA) -> float:
+    """Group closeness centrality via multi-source BFS on a sparse adjacency matrix.
 
-def _centrality_scores_helper(
-    cat: Iterable[Any],
-    clusters: Sequence[str],
-    fun: Callable[..., float],
-    method: str,
-    queue: SigQueue | None = None,
-) -> pd.DataFrame:
-    res_list = []
-    for c in cat:
-        idx = np.where(clusters == c)[0]
-        res = fun(idx)
-        res_list.append(res)
+    Uses two pre-allocated buffers swapped each level to avoid allocations
+    inside the hot loop, and a bool visited array instead of int32 dist.
+    """
+    n = g.shape[0]
+    n_group = len(idx)
+    n_non_group = n - n_group
+    if n_non_group == 0:
+        return 0.0
 
-        if queue is not None:
-            queue.put(Signal.UPDATE)
+    visited = np.zeros(n, dtype=np.bool_)
+    visited[idx] = True
 
-    if queue is not None:
-        queue.put(Signal.FINISH)
+    buf_a = np.empty(n, dtype=np.int32)
+    buf_b = np.empty(n, dtype=np.int32)
+    buf_a[:n_group] = idx
+    frontier_size = n_group
 
-    return pd.DataFrame(res_list, columns=[method], index=cat)
+    level = 0
+    total_dist = np.int64(0)
+    reached = 0
+    use_a = True
+    while frontier_size > 0:
+        level += 1
+        frontier = buf_a if use_a else buf_b
+        next_frontier = buf_b if use_a else buf_a
+        next_size = 0
+        for i in range(frontier_size):
+            v = frontier[i]
+            for j in range(g.indptr[v], g.indptr[v + 1]):
+                nb = g.indices[j]
+                if not visited[nb]:
+                    visited[nb] = True
+                    total_dist += level
+                    reached += 1
+                    next_frontier[next_size] = nb
+                    next_size += 1
+        frontier_size = next_size
+        use_a = not use_a
+        if reached >= n_non_group:
+            break
+
+    if total_dist == 0:
+        return 0.0
+    return n_non_group / total_dist
+
+
+def _group_degree_centrality(adj: spmatrix, idx: NDArrayA) -> float:
+    """Group degree centrality: fraction of non-group nodes adjacent to any group member."""
+    n = adj.shape[0]
+    n_group = len(idx)
+    if n_group >= n:
+        return 0.0
+
+    is_group = np.zeros(n, dtype=np.bool_)
+    is_group[idx] = True
+
+    neighbors = adj[idx].sum(axis=0).A1 > 0
+    count = int(np.count_nonzero(neighbors & ~is_group))
+    return count / (n - n_group)
+
+
+def _clustering_coefficients(adj: spmatrix) -> NDArrayA:
+    """Per-node local clustering coefficients via sparse triangle counting.
+
+    Precomputed once and reused for all clusters.
+    """
+    degrees = np.asarray(adj.sum(axis=1)).ravel()
+    adj_sq = adj @ adj
+    triangles = np.asarray(adj.multiply(adj_sq).sum(axis=1)).ravel() / 2.0
+    denom = degrees * (degrees - 1)
+    cc = np.zeros(len(degrees), dtype=np.float32)
+    valid = denom > 0
+    cc[valid] = 2.0 * triangles[valid] / denom[valid]
+    return cc
+
+
+def _average_clustering(cc: NDArrayA, idx: NDArrayA) -> float:
+    """Average clustering coefficient for a group of nodes."""
+    group_cc = cc[idx]
+    return float(np.mean(group_cc)) if len(group_cc) > 0 else 0.0
 
 
 def _nhood_enrichment_helper(
