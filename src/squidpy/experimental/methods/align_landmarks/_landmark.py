@@ -1,4 +1,4 @@
-"""Closed-form landmark alignment estimators."""
+"""Closed-form landmark alignment aligners."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import numpy as np
 import numpy.typing as npt
 
 from squidpy._utils import NDArrayA
-from squidpy.experimental.methods.registry import ALIGN_LANDMARKS
+from squidpy.experimental.methods._base import Aligner
 
 
 @dataclass
@@ -59,60 +59,52 @@ def _fit_landmark_relation(
     )
 
 
-@ALIGN_LANDMARKS.register("similarity")
-def fit_similarity(
-    ref: np.ndarray,
-    query: np.ndarray,
-    *,
-    source_cs: str | None = None,
-    target_cs: str | None = None,
-) -> AffineFitResult:
+class SimilarityAligner(Aligner):
     """4-DOF similarity fit (rotation + uniform scale + translation), via spatialdata.
 
-    Parameters
-    ----------
-    ref, query
-        Pre-paired ``(N, 2)`` ``(x, y)`` landmark arrays (``N >= 3``).
-    source_cs, target_cs
-        Optional coordinate-system labels stamped onto the result for
-        traceability; they do not affect the fit.
+    See :func:`~squidpy.experimental.tl.align_landmarks_similarity` for the
+    user-facing API or :func:`~squidpy.experimental.tl.align_landmarks_from_aligner`
+    for direct aligner usage.
     """
-    return _fit_landmark_relation(
-        ref,
-        query,
-        method="similarity",
-        solve_fn=_fit_similarity,
-        source_cs=source_cs,
-        target_cs=target_cs,
-    )
+
+    def __init__(self, *, source_cs: str | None = None, target_cs: str | None = None) -> None:
+        self.source_cs = source_cs
+        self.target_cs = target_cs
+
+    def align(self, ref: npt.ArrayLike, query: npt.ArrayLike) -> AffineFitResult:
+        """Fit a similarity transform from pre-paired ``(N, 2)`` ``(x, y)`` landmarks (``N >= 3``)."""
+        return _fit_landmark_relation(
+            np.asarray(ref),
+            np.asarray(query),
+            method="similarity",
+            solve_fn=_fit_similarity,
+            source_cs=self.source_cs,
+            target_cs=self.target_cs,
+        )
 
 
-@ALIGN_LANDMARKS.register("affine")
-def fit_affine(
-    ref: np.ndarray,
-    query: np.ndarray,
-    *,
-    source_cs: str | None = None,
-    target_cs: str | None = None,
-) -> AffineFitResult:
+class AffineAligner(Aligner):
     """6-DOF affine fit (rotation + non-uniform scale + shear + translation), via skimage.
 
-    Parameters
-    ----------
-    ref, query
-        Pre-paired ``(N, 2)`` ``(x, y)`` landmark arrays (``N >= 3``).
-    source_cs, target_cs
-        Optional coordinate-system labels stamped onto the result for
-        traceability; they do not affect the fit.
+    See :func:`~squidpy.experimental.tl.align_landmarks_affine` for the
+    user-facing API or :func:`~squidpy.experimental.tl.align_landmarks_from_aligner`
+    for direct aligner usage.
     """
-    return _fit_landmark_relation(
-        ref,
-        query,
-        method="affine",
-        solve_fn=_fit_affine,
-        source_cs=source_cs,
-        target_cs=target_cs,
-    )
+
+    def __init__(self, *, source_cs: str | None = None, target_cs: str | None = None) -> None:
+        self.source_cs = source_cs
+        self.target_cs = target_cs
+
+    def align(self, ref: npt.ArrayLike, query: npt.ArrayLike) -> AffineFitResult:
+        """Fit a full affine transform from pre-paired ``(N, 2)`` ``(x, y)`` landmarks (``N >= 3``)."""
+        return _fit_landmark_relation(
+            np.asarray(ref),
+            np.asarray(query),
+            method="affine",
+            solve_fn=_fit_affine,
+            source_cs=self.source_cs,
+            target_cs=self.target_cs,
+        )
 
 
 def _validate_landmarks(points: np.ndarray, *, name: str) -> np.ndarray:

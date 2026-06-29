@@ -140,22 +140,26 @@ See the {doc}`extensibility guide </extensibility>` for how to implement a custo
     gr.neighbors.GridBuilder
 ```
 
-The ``method=`` argument of {func}`~squidpy.experimental.tl.align` and
-{func}`~squidpy.experimental.tl.align_by_landmarks` dispatches to a registered
-fitting function. The method-specific arguments are documented on each function
-below; the fitted maps are returned (with ``output_mode="object"``) as the
-result types listed alongside.
+Alignment follows the same builder-style pattern as the spatial-neighbor graphs:
+each method has a thin public function (e.g. {func}`~squidpy.experimental.tl.align_stalign`),
+and the {class}`~squidpy.experimental.methods.Aligner` classes can be passed directly to
+{func}`~squidpy.experimental.tl.align_from_aligner` /
+{func}`~squidpy.experimental.tl.align_landmarks_from_aligner` for custom backends
+(see the {doc}`extensibility guide </extensibility>`). The fitted maps are returned
+(with ``output_mode="object"``) as the result types listed below.
 
 ```{eval-rst}
 .. currentmodule:: squidpy
 .. autosummary::
     :toctree: api
 
-    experimental.methods.align_samples._stalign.fit_stalign
-    experimental.methods.align_landmarks._landmark.fit_similarity
-    experimental.methods.align_landmarks._landmark.fit_affine
-    experimental.methods.align_samples._stalign.StalignResult
-    experimental.methods.align_landmarks._landmark.AffineFitResult
+    experimental.methods.Aligner
+    experimental.methods.StalignAligner
+    experimental.methods.StalignConfig
+    experimental.methods.SimilarityAligner
+    experimental.methods.AffineAligner
+    experimental.methods.StalignResult
+    experimental.methods.AffineFitResult
 ```
 
 ## Experimental
@@ -168,8 +172,12 @@ result types listed alongside.
     experimental.im.calculate_image_features
     experimental.tl.calculate_tiling_qc
     experimental.tl.TilingQCParams
-    experimental.tl.align
-    experimental.tl.align_by_landmarks
+    experimental.tl.align_stalign
+    experimental.tl.align_from_aligner
+    experimental.tl.align_landmarks_similarity
+    experimental.tl.align_landmarks_affine
+    experimental.tl.align_landmarks_from_aligner
+    experimental.tl.Aligner
     experimental.tl.AlignResult
     experimental.tl.assign_stitch_groups
     experimental.tl.StitchParams

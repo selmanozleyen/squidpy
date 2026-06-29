@@ -114,3 +114,59 @@ import squidpy as sq
 
 sq.gr.spatial_neighbors_from_builder(adata, PynndescentKNNBuilder(n_neighs=6))
 ```
+
+## Custom alignment aligners
+
+Sample alignment follows the same pattern. {class}`~squidpy.experimental.methods.Aligner`
+is the single base class: implement {meth}`~squidpy.experimental.methods.Aligner.align`,
+which takes a reference and a query (point clouds for sample alignment, paired
+landmarks for landmark alignment) and returns an
+{class}`~squidpy.experimental.methods.AlignResult` — anything whose ``transform``
+maps ``(N, 2)`` ``(x, y)`` points into the reference frame.
+
+| Base class | Method | Required | Purpose |
+|---|---|---|---|
+| {class}`~squidpy.experimental.methods.Aligner` | {meth}`~squidpy.experimental.methods.Aligner.align` | yes | Fit the alignment mapping ``query`` onto ``ref`` and return an ``AlignResult``. |
+
+The built-in {class}`~squidpy.experimental.methods.StalignAligner` (JAX LDDMM) and the
+closed-form landmark aligners ({class}`~squidpy.experimental.methods.SimilarityAligner`,
+{class}`~squidpy.experimental.methods.AffineAligner`) are concrete examples. Run any
+aligner against a container with
+{func}`~squidpy.experimental.tl.align_from_aligner` (sample alignment) or
+{func}`~squidpy.experimental.tl.align_landmarks_from_aligner` (landmark alignment) —
+the function handles all container I/O and write-back, so the aligner only ever sees
+plain arrays.
+
+### Example: a translation-only aligner
+
+```python
+import numpy as np
+
+from squidpy.experimental.methods import Aligner
+
+
+class CentroidShiftResult:
+    """Minimal ``AlignResult``: a constant offset baked into ``transform``."""
+
+    def __init__(self, delta):
+        self.delta = delta
+
+    def transform(self, points):
+        return np.asarray(points, dtype=float) + self.delta
+
+
+class CentroidShiftAligner(Aligner):
+    """Align by matching the query centroid to the reference centroid."""
+
+    def align(self, ref, query):
+        delta = np.asarray(ref, dtype=float).mean(0) - np.asarray(query, dtype=float).mean(0)
+        return CentroidShiftResult(delta)
+```
+
+Use it like any built-in aligner:
+
+```python
+import squidpy as sq
+
+sq.experimental.tl.align_from_aligner(ref_adata, query_adata, CentroidShiftAligner())
+```

@@ -1,14 +1,15 @@
 """``align_samples`` family: align two samples' point clouds (STalign).
 
-Importing this package registers the family's estimators into
-:data:`~squidpy.experimental.methods.registry.ALIGN_SAMPLES`. It stays
-cheap -- JAX is pulled in lazily, only when an estimator's ``fit`` runs. Only the
-implementations are re-exported here; the registry itself lives in (and is public
-from) :mod:`squidpy.experimental.methods`.
+Stays cheap to import -- JAX is pulled in lazily, only when an aligner's
+:meth:`~squidpy.experimental.methods.StalignAligner.align` runs.
 """
 
 from __future__ import annotations
 
-from squidpy.experimental.methods.align_samples._stalign import StalignResult, fit_stalign
+from squidpy.experimental.methods.align_samples._stalign import (
+    StalignAligner,
+    StalignConfig,
+    StalignResult,
+)
 
-__all__ = ["fit_stalign", "StalignResult"]
+__all__ = ["StalignAligner", "StalignConfig", "StalignResult"]

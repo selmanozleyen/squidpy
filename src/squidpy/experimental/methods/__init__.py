@@ -1,32 +1,35 @@
 """In-memory model-fitting core for experimental methods.
 
-The :mod:`.registry` subpackage holds the registry machinery and the family
-registries; each family subpackage (e.g. :mod:`.align_samples`,
-:mod:`.align_landmarks`) holds the estimator implementations. Importing this
-package imports those subpackages so the estimators register themselves into the
-(public) family registries. Each subpackage stays cheap to import -- heavy or
-optional dependencies (e.g. JAX) are pulled in lazily, only when an estimator
-actually runs.
+:mod:`._base` holds the shared contracts -- :class:`AlignResult` (the result a
+public ``align*`` function consumes) and :class:`Aligner` (the base class every
+aligner subclasses). Each family subpackage (e.g. :mod:`.align_samples`,
+:mod:`.align_landmarks`) holds the concrete aligners. Each subpackage stays cheap
+to import -- heavy or optional dependencies (e.g. JAX) are pulled in lazily, only
+when an aligner actually runs.
 """
 
 from __future__ import annotations
 
-# Import for side effects: populates ALIGN_SAMPLES / ALIGN_LANDMARKS.
-from squidpy.experimental.methods import align_landmarks, align_samples  # noqa: F401
-from squidpy.experimental.methods.registry import (
-    ALIGN_LANDMARKS,
-    ALIGN_SAMPLES,
-    AlignLandmarksFn,
-    AlignResult,
-    AlignSamplesFn,
-    Registry,
+from squidpy.experimental.methods._base import Aligner, AlignResult, require_optional_deps
+from squidpy.experimental.methods.align_landmarks import (
+    AffineAligner,
+    AffineFitResult,
+    SimilarityAligner,
+)
+from squidpy.experimental.methods.align_samples import (
+    StalignAligner,
+    StalignConfig,
+    StalignResult,
 )
 
 __all__ = [
-    "Registry",
     "AlignResult",
-    "AlignSamplesFn",
-    "AlignLandmarksFn",
-    "ALIGN_SAMPLES",
-    "ALIGN_LANDMARKS",
+    "Aligner",
+    "require_optional_deps",
+    "StalignAligner",
+    "StalignConfig",
+    "StalignResult",
+    "SimilarityAligner",
+    "AffineAligner",
+    "AffineFitResult",
 ]
