@@ -16,9 +16,7 @@ apart -- and a key declared without one fails at import.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Annotated, Literal, Required, TypedDict
-
-import numpy as np
+from typing import Annotated, TypedDict
 
 from squidpy._utils import RNGLike, SeedLike
 from squidpy.experimental.utils._params import Default, defaults_of
@@ -32,8 +30,6 @@ from squidpy.experimental.utils._params import Default, defaults_of
 DEFAULT_LUMINOSITY_THRESHOLD: float = 0.8
 
 __all__ = [
-    "StainMethod",
-    "StainReference",
     "BackgroundDetectionParams",
     "FelzenszwalbParams",
     "WekaParams",
@@ -43,42 +39,6 @@ __all__ = [
     "TilingQCParams",
     "StitchParams",
 ]
-
-
-#: Which fitting method produced a :class:`StainReference`.
-StainMethod = Literal["macenko", "vahadane", "reinhard"]
-
-
-class StainReference(TypedDict, total=False):
-    """A fitted stain reference: either a stain matrix or Ruderman Lab statistics.
-
-    Produced by :func:`~squidpy.experimental.im.fit_stain_reference` and consumed by
-    :func:`~squidpy.experimental.im.normalize_stains` and
-    :func:`~squidpy.experimental.im.decompose_stains`. Which keys apply depends on
-    ``method``: the decomposition methods (``"macenko"``, ``"vahadane"``) take
-    ``stain_matrix`` and ``white_point``, ``"reinhard"`` takes ``mu`` and ``sigma``,
-    and each forbids the other's keys. ``validate_stain_reference`` enforces that,
-    fills the inapplicable keys with ``None``, and coerces every array to
-    ``float64``.
-    """
-
-    method: Required[StainMethod]
-    """Fitting method this reference was produced by."""
-
-    stain_matrix: np.ndarray | None
-    """Shape ``(3, 3)`` unit-norm matrix in canonical order ``(H, E, complement)``. Decomposition methods only."""
-
-    mu: np.ndarray | None
-    """Shape ``(3,)`` Ruderman Lab channel means. Reinhard only."""
-
-    sigma: np.ndarray | None
-    """Shape ``(3,)`` Ruderman Lab channel standard deviations, strictly positive. Reinhard only."""
-
-    white_point: np.ndarray | None
-    """Shape ``(3,)`` strictly positive per-channel background intensity. Decomposition methods only."""
-
-    max_concentrations: np.ndarray | None
-    """Shape ``(2,)`` strictly positive reference concentration percentiles for H and E. Decomposition methods only."""
 
 
 class BackgroundDetectionParams(TypedDict, total=False):

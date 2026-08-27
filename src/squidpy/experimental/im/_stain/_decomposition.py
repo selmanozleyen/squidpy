@@ -23,7 +23,7 @@ from squidpy.experimental.im._stain._conversion import (
     sda_to_rgb,
 )
 from squidpy.experimental.im._stain._mask import as_spatial_mask, foreground_mask_from_sda
-from squidpy.experimental.im._stain._reference import StainMethod, StainReference, validate_stain_reference
+from squidpy.experimental.im._stain._reference import StainMethod, StainReference
 from squidpy.experimental.im._stain._validation import (
     StainFittingError,
     _unit_columns,
@@ -183,18 +183,16 @@ def fit_decomposition(
     reference: dict[str, np.ndarray] = RUIFROK_HE,
     max_angle_deg: float = 45.0,
 ) -> StainReference:
-    """Fit a decomposition :class:`~squidpy.experimental.types.StainReference` (stain matrix + max concentrations)."""
+    """Fit a decomposition :class:`~squidpy.experimental.im.StainReference` (stain matrix + max concentrations)."""
     # `params` is `total=False`, so resolve rather than assume every key is present.
     params = _resolve_macenko_params(params) if method == "macenko" else _resolve_vahadane_params(params)
     od = _tissue_od(image_rgb, white_point, params["beta"], tissue_mask=tissue_mask, image_key=image_key)
     matrix = _stain_matrix(od, method, params, image_key=image_key, reference=reference, max_angle_deg=max_angle_deg)
-    return validate_stain_reference(
-        {
-            "method": method,
-            "stain_matrix": matrix,
-            "white_point": np.asarray(white_point, dtype=np.float64),
-            "max_concentrations": _max_concentrations(_concentrations(od, matrix)),
-        }
+    return StainReference(
+        method=method,
+        stain_matrix=matrix,
+        white_point=np.asarray(white_point, dtype=np.float64),
+        max_concentrations=_max_concentrations(_concentrations(od, matrix)),
     )
 
 
@@ -225,18 +223,15 @@ def apply_decomposition(
     materialised to fit a matrix.
     """
     _check_channel_dim(image_rgb)
-    # a `StainReference` is a plain mapping, so re-check it here rather than trust the
-    # caller: three tiny arrays, once per call.
-    reference = validate_stain_reference(reference)
-    bg = reference["white_point"]
+    bg = reference.white_point
     # `params` is `total=False`, so resolve rather than assume every key is present.
-    params = _resolve_macenko_params(params) if reference["method"] == "macenko" else _resolve_vahadane_params(params)
+    params = _resolve_macenko_params(params) if reference.method == "macenko" else _resolve_vahadane_params(params)
 
     od_src = _tissue_od(
         fit_rgb if fit_rgb is not None else image_rgb, bg, params["beta"], tissue_mask=tissue_mask, image_key=None
     )
-    w_src = _stain_matrix(od_src, reference["method"], params, image_key=None)
-    operator = reference["stain_matrix"] @ np.linalg.pinv(w_src)
+    w_src = _stain_matrix(od_src, reference.method, params, image_key=None)
+    operator = reference.stain_matrix @ np.linalg.pinv(w_src)
 
     sda = rgb_to_sda(image_rgb, bg)
     dtype = _working_dtype(sda)

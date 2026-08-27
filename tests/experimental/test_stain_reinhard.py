@@ -68,11 +68,11 @@ class TestMaskedChannelStats:
 class TestFitReinhard:
     def test_returns_valid_reference(self, rgb_a: np.ndarray) -> None:
         ref = fit_reinhard(_da(rgb_a, chunked=False), ReinhardParams())
-        assert ref["method"] == "reinhard"
-        assert ref["mu"].shape == (3,)
-        assert ref["sigma"].shape == (3,)
-        assert np.all(np.isfinite(ref["mu"]))
-        assert np.all(ref["sigma"] > 0)
+        assert ref.method == "reinhard"
+        assert ref.mu.shape == (3,)
+        assert ref.sigma.shape == (3,)
+        assert np.all(np.isfinite(ref.mu))
+        assert np.all(ref.sigma > 0)
 
 
 class TestApplyReinhard:
@@ -88,8 +88,8 @@ class TestApplyReinhard:
         ref = fit_reinhard(_da(rgb_a, chunked=False), params)
         normalized = apply_reinhard(_da(rgb_b, chunked=False), ref, params)
         refit = fit_reinhard(normalized, params)
-        np.testing.assert_allclose(refit["mu"], ref["mu"], atol=1e-4)
-        np.testing.assert_allclose(refit["sigma"], ref["sigma"], atol=1e-4)
+        np.testing.assert_allclose(refit.mu, ref.mu, atol=1e-4)
+        np.testing.assert_allclose(refit.sigma, ref.sigma, atol=1e-4)
 
     def test_lazy_in_lazy_out(self, rgb_a: np.ndarray, rgb_b: np.ndarray) -> None:
         params = ReinhardParams()
@@ -150,4 +150,4 @@ class TestResolveReinhardParams:
 
 def test_reference_is_stainreference(rgb_a: np.ndarray) -> None:
     ref = fit_reinhard(_da(rgb_a, chunked=False), ReinhardParams())
-    assert isinstance(ref, dict) and set(ref) == set(StainReference.__annotations__)
+    assert isinstance(ref, StainReference)

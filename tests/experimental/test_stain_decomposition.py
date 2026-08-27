@@ -52,10 +52,10 @@ class TestMacenko:
         truth = _canonical(RUIFROK_HE["hematoxylin"], RUIFROK_HE["eosin"])
         img = _synthetic_he(truth, chunked=chunked)
         ref = fit_decomposition(img, "macenko", MacenkoParams(), _WHITE)
-        assert angle_between_deg(ref["stain_matrix"][:, 0], truth[:, 0]) < 12.0
-        assert angle_between_deg(ref["stain_matrix"][:, 1], truth[:, 1]) < 12.0
-        assert ref["max_concentrations"].shape == (2,)
-        assert np.all(ref["max_concentrations"] > 0)
+        assert angle_between_deg(ref.stain_matrix[:, 0], truth[:, 0]) < 12.0
+        assert angle_between_deg(ref.stain_matrix[:, 1], truth[:, 1]) < 12.0
+        assert ref.max_concentrations.shape == (2,)
+        assert np.all(ref.max_concentrations > 0)
 
 
 class TestVahadane:
@@ -63,8 +63,8 @@ class TestVahadane:
         truth = _canonical(RUIFROK_HE["hematoxylin"], RUIFROK_HE["eosin"])
         img = _synthetic_he(truth)
         ref = fit_decomposition(img, "vahadane", VahadaneParams(), _WHITE)
-        assert angle_between_deg(ref["stain_matrix"][:, 0], truth[:, 0]) < 20.0
-        assert angle_between_deg(ref["stain_matrix"][:, 1], truth[:, 1]) < 20.0
+        assert angle_between_deg(ref.stain_matrix[:, 0], truth[:, 0]) < 20.0
+        assert angle_between_deg(ref.stain_matrix[:, 1], truth[:, 1]) < 20.0
 
 
 class TestApplyDecomposition:
@@ -80,8 +80,8 @@ class TestApplyDecomposition:
 
         normalized = apply_decomposition(img_b, ref_a, MacenkoParams())
         refit = fit_decomposition(normalized, "macenko", MacenkoParams(), _WHITE)
-        assert angle_between_deg(refit["stain_matrix"][:, 0], ref_a["stain_matrix"][:, 0]) < 12.0
-        assert angle_between_deg(refit["stain_matrix"][:, 1], ref_a["stain_matrix"][:, 1]) < 12.0
+        assert angle_between_deg(refit.stain_matrix[:, 0], ref_a.stain_matrix[:, 0]) < 12.0
+        assert angle_between_deg(refit.stain_matrix[:, 1], ref_a.stain_matrix[:, 1]) < 12.0
 
     def test_lazy_in_lazy_out(self) -> None:
         truth = _canonical(RUIFROK_HE["hematoxylin"], RUIFROK_HE["eosin"])
@@ -93,18 +93,16 @@ class TestApplyDecomposition:
         # Colour-basis transfer carries no maxC_ref/maxC_src term: two references
         # with the same stain matrix + white point but different max_concentrations
         # produce identical output. A canonical-Macenko intensity rescale would not.
-        from squidpy.experimental.im._stain._reference import validate_stain_reference
+        from squidpy.experimental.im._stain._reference import StainReference
 
         truth = _canonical(RUIFROK_HE["hematoxylin"], RUIFROK_HE["eosin"])
         img = _synthetic_he(truth, seed=2)
         ref1 = fit_decomposition(_synthetic_he(truth, seed=1), "macenko", MacenkoParams(), _WHITE)
-        ref2 = validate_stain_reference(
-            {
-                "method": "macenko",
-                "stain_matrix": ref1["stain_matrix"],
-                "white_point": ref1["white_point"],
-                "max_concentrations": ref1["max_concentrations"] * 5.0,
-            }
+        ref2 = StainReference(
+            method="macenko",
+            stain_matrix=ref1.stain_matrix,
+            white_point=ref1.white_point,
+            max_concentrations=ref1.max_concentrations * 5.0,
         )
         out1 = apply_decomposition(img, ref1, MacenkoParams()).values
         out2 = apply_decomposition(img, ref2, MacenkoParams()).values

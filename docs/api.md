@@ -158,8 +158,6 @@ See the {doc}`extensibility guide </extensibility>` for how to implement a custo
     experimental.tl.make_stitched_labels
     experimental.pl.tiling_qc
     experimental.im.fit_stain_reference
-    experimental.im.normalize_stains
-    experimental.im.decompose_stains
     experimental.im.estimate_white_point
     experimental.im.detect_tissue
 ```
@@ -168,5 +166,8 @@ See the {doc}`extensibility guide </extensibility>` for how to implement a custo
 
 ```{eval-rst}
 .. automodule:: squidpy.experimental.types
+    :members:
+
+.. autoclass:: squidpy.experimental.im.StainReference
     :members:
 ```
