@@ -7,7 +7,34 @@ without notice.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import Any, cast
+from dataclasses import dataclass
+from typing import Any, cast, get_type_hints
+
+
+@dataclass(frozen=True, slots=True)
+class Default:
+    """The default value of a params key, carried in its ``Annotated`` metadata.
+
+    Keeps the default next to the key and its docstring instead of in a parallel
+    mapping -- one source of truth for the resolver and for the docs.
+    """
+
+    value: Any
+
+
+def defaults_of[T: Mapping[str, Any]](spec: type[T]) -> T:
+    """Collect the :class:`Default` of every key of a params TypedDict.
+
+    Raises if a key declares no default: with ``total=False`` a type checker
+    cannot see a missing entry, so catch it at import time instead.
+    """
+    defaults = {}
+    for key, hint in get_type_hints(spec, include_extras=True).items():
+        marker = next((m for m in getattr(hint, "__metadata__", ()) if isinstance(m, Default)), None)
+        if marker is None:
+            raise TypeError(f"`{spec.__name__}.{key}` is missing a `Default(...)` in its annotation.")
+        defaults[key] = marker.value
+    return cast("T", defaults)
 
 
 def resolve_params[T: Mapping[str, Any]](
@@ -33,9 +60,7 @@ def resolve_params[T: Mapping[str, Any]](
     if params:
         unknown = set(params) - set(defaults)
         if unknown:
-            raise ValueError(
-                f"Unknown `{arg_name}` field(s): {sorted(unknown)}; expected from {sorted(defaults)}."
-            )
+            raise ValueError(f"Unknown `{arg_name}` field(s): {sorted(unknown)}; expected from {sorted(defaults)}.")
     merged = {**defaults, **(params or {})}
     if validate is not None:
         validate(merged)

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, Unpack
 
 import anndata as ad
 import numpy as np
@@ -74,9 +74,7 @@ def validate_qc_params(params: dict[str, Any]) -> None:
 
 def _resolve_qc_params(qc_params: TilingQCParams | Mapping[str, Any] | None) -> TilingQCParams:
     """Normalise the ``tiling_qc_params`` argument to a validated :class:`~squidpy.experimental.types.TilingQCParams`."""
-    return resolve_params(
-        qc_params, defaults=_QC_DEFAULTS, validate=validate_qc_params, arg_name="tiling_qc_params"
-    )
+    return resolve_params(qc_params, defaults=_QC_DEFAULTS, validate=validate_qc_params, arg_name="tiling_qc_params")
 
 
 # Standard consistency factor sd ~ 1.4826 x MAD for normal distributions.
@@ -420,10 +418,10 @@ def calculate_tiling_qc(
     nmads_cut: float = 1.5,
     nmads_smoothed: float = 3,
     n_neighbors: int = 10,
-    tiling_qc_params: TilingQCParams | Mapping[str, Any] | None = None,
     n_jobs: int = -1,
     table_key_added: str | None = None,
     inplace: bool = True,
+    **tiling_qc_params: Unpack[TilingQCParams],
 ) -> ad.AnnData | None:
     """Score cells for tile-boundary segmentation artifacts.
 
@@ -474,11 +472,6 @@ def calculate_tiling_qc(
         perfect grid each cell has 8 immediate neighbours; the default
         of 10 leaves a little wiggle room for biological irregularity
         without wasting compute on distant cells.
-    tiling_qc_params
-        Advanced tuning knobs as a :class:`~squidpy.experimental.types.TilingQCParams` instance or
-        a ``Mapping`` of its field names to values.  See
-        :class:`~squidpy.experimental.types.TilingQCParams` for each field's meaning and default.
-        ``None`` (default) uses all defaults.
     n_jobs
         Number of threads for tile processing.  ``-1`` (default) uses
         all available CPUs; ``0`` and values below ``-1`` raise.
@@ -491,6 +484,10 @@ def calculate_tiling_qc(
     inplace
         If ``True``, store result in ``sdata.tables``.  Otherwise
         return the AnnData directly.
+    **tiling_qc_params
+        Advanced tuning knobs, passed as keyword arguments.  See
+        :class:`~squidpy.experimental.types.TilingQCParams` for each key's meaning
+        and default; omitted keys keep their default.
 
     Returns
     -------

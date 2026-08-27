@@ -407,3 +407,21 @@ class TestTilingQCVisual(PlotTester, metaclass=PlotTesterMeta):
             labels_key="labels",
             score_col="smoothed_cut_score",
         )
+
+
+class TestTilingQCParamsKeywords:
+    """`calculate_tiling_qc` takes the `TilingQCParams` keys as keyword arguments."""
+
+    def test_key_passed_as_keyword(self, sdata_tile_boundary):
+        sdata, _ = sdata_tile_boundary
+        adata = sq.experimental.tl.calculate_tiling_qc(
+            sdata, labels_key="labels", tile_size=200, inplace=False, distance_tol=1.5
+        )
+        assert adata.uns["tiling_qc"]["tiling_qc_params"]["distance_tol"] == 1.5
+
+    def test_unknown_keyword_raises(self, sdata_tile_boundary):
+        sdata, _ = sdata_tile_boundary
+        with pytest.raises(ValueError, match="Unknown `tiling_qc_params` field"):
+            sq.experimental.tl.calculate_tiling_qc(
+                sdata, labels_key="labels", tile_size=200, inplace=False, distancetol=1.5
+            )

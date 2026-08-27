@@ -173,23 +173,33 @@ html_theme_options = {"navigation_depth": 4, "logo_only": True}
 html_show_sphinx = False
 
 
-# The `*Params` TypedDicts keep their defaults in a sibling `_*_DEFAULTS` mapping
-# rather than on the class (a TypedDict cannot carry values), so autodoc has no
-# default to show. Read it from that mapping at build time -- one source of truth,
-# no defaults duplicated into docstrings where they could drift.
+# Each params key carries its default in the `Annotated` metadata of its
+# declaration (`squidpy.experimental.utils._params.Default`). Read it from there --
+# one source of truth, no defaults restated in docstrings where they could drift.
+
+
 @cache
 def _params_defaults() -> dict[str, dict[str, object]]:
-    """Map each ``*Params`` class name to the ``_*_DEFAULTS`` mapping that fills it.
+    """Read every params key's ``Default`` -- and then hide it from autodoc.
 
-    Each defaults mapping is annotated with the TypedDict it belongs to, so the
-    pairing already lives in the source -- read it instead of restating it here.
+    Autodoc renders `Annotated` metadata verbatim (`Annotated[float, Default(1.0)]`),
+    so once the defaults are in hand each annotation is replaced by its bare type.
+    `_append_default` puts the default back where it belongs, in the description.
     """
     from typing import get_type_hints
 
     from squidpy.experimental import types
+    from squidpy.experimental.utils._params import defaults_of
 
-    hints = get_type_hints(types)
-    return {hints[name].__name__: getattr(types, name) for name in hints if name.endswith("_DEFAULTS")}
+    defaults = {}
+    for name in types.__all__:
+        cls = getattr(types, name)
+        defaults[name] = dict(defaults_of(cls))
+        cls.__annotations__ = {
+            key: hint.__origin__ if hasattr(hint, "__metadata__") else hint
+            for key, hint in get_type_hints(cls, include_extras=True).items()
+        }
+    return defaults
 
 
 def _append_default(app, what, name, obj, options, lines) -> None:  # type: ignore[no-untyped-def]
@@ -210,6 +220,7 @@ def _skip_dict_api(app, what, name, obj, skip, options) -> bool | None:  # type:
 
 
 def setup(app: Sphinx) -> None:
+    app.connect("builder-inited", lambda _app: _params_defaults())
     app.connect("autodoc-process-docstring", _append_default)
     app.connect("autodoc-skip-member", _skip_dict_api)
     app.add_css_file("css/custom.css")
