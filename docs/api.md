@@ -166,4 +166,8 @@ See the {doc}`extensibility guide </extensibility>` for how to implement a custo
     experimental.im.ReinhardParams
     experimental.im.MacenkoParams
     experimental.im.VahadaneParams
+    experimental.im.detect_tissue
+    experimental.im.BackgroundDetectionParams
+    experimental.im.FelzenszwalbParams
+    experimental.im.WekaParams
 ```
