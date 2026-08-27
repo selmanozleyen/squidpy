@@ -7,17 +7,18 @@ that consume them, and the validators that range-check them, stay next to the
 code they belong to.
 
 All are ``total=False``: callers pass a partial mapping, get static key and value
-checking at the call site, and :func:`squidpy.experimental.utils._params.resolve_params`
-merges it over the defaults and validates the result at runtime. The ``_*_DEFAULTS``
-mappings below are collected from the annotations by
-:func:`~squidpy.experimental.utils._params.defaults_of`, so a key and its default
-cannot drift apart -- and a key declared without one fails at import.
+checking at the call site, and ``resolve_params`` merges it over the defaults and
+validates the result at runtime. The ``_*_DEFAULTS`` mappings below are collected
+from the annotations by ``defaults_of``, so a key and its default cannot drift
+apart -- and a key declared without one fails at import.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Annotated, TypedDict
+from typing import Annotated, Literal, Required, TypedDict
+
+import numpy as np
 
 from squidpy._utils import RNGLike, SeedLike
 from squidpy.experimental.utils._params import Default, defaults_of
@@ -31,6 +32,8 @@ from squidpy.experimental.utils._params import Default, defaults_of
 DEFAULT_LUMINOSITY_THRESHOLD: float = 0.8
 
 __all__ = [
+    "StainMethod",
+    "StainReference",
     "BackgroundDetectionParams",
     "FelzenszwalbParams",
     "WekaParams",
@@ -40,6 +43,42 @@ __all__ = [
     "TilingQCParams",
     "StitchParams",
 ]
+
+
+#: Which fitting method produced a :class:`StainReference`.
+StainMethod = Literal["macenko", "vahadane", "reinhard"]
+
+
+class StainReference(TypedDict, total=False):
+    """A fitted stain reference: either a stain matrix or Ruderman Lab statistics.
+
+    Produced by :func:`~squidpy.experimental.im.fit_stain_reference` and consumed by
+    :func:`~squidpy.experimental.im.normalize_stains` and
+    :func:`~squidpy.experimental.im.decompose_stains`. Which keys apply depends on
+    ``method``: the decomposition methods (``"macenko"``, ``"vahadane"``) take
+    ``stain_matrix`` and ``white_point``, ``"reinhard"`` takes ``mu`` and ``sigma``,
+    and each forbids the other's keys. ``validate_stain_reference`` enforces that,
+    fills the inapplicable keys with ``None``, and coerces every array to
+    ``float64``.
+    """
+
+    method: Required[StainMethod]
+    """Fitting method this reference was produced by."""
+
+    stain_matrix: np.ndarray | None
+    """Shape ``(3, 3)`` unit-norm matrix in canonical order ``(H, E, complement)``. Decomposition methods only."""
+
+    mu: np.ndarray | None
+    """Shape ``(3,)`` Ruderman Lab channel means. Reinhard only."""
+
+    sigma: np.ndarray | None
+    """Shape ``(3,)`` Ruderman Lab channel standard deviations, strictly positive. Reinhard only."""
+
+    white_point: np.ndarray | None
+    """Shape ``(3,)`` strictly positive per-channel background intensity. Decomposition methods only."""
+
+    max_concentrations: np.ndarray | None
+    """Shape ``(2,)`` strictly positive reference concentration percentiles for H and E. Decomposition methods only."""
 
 
 class BackgroundDetectionParams(TypedDict, total=False):

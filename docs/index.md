@@ -63,7 +63,6 @@ We are happy about any contributions! Before you start, check out our [contribut
     installation
     api
     classes
-    experimental_types
     extensibility
     release_notes
     references

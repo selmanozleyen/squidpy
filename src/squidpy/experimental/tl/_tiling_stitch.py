@@ -749,10 +749,7 @@ def assign_stitch_groups(
         Cap on group size; oversized groups (likely false merges) collapse
         to singletons.
     stitch_params
-        Advanced tuning knobs as a :class:`~squidpy.experimental.types.StitchParams` instance or a
-        ``Mapping`` of its field names to values.  See :class:`~squidpy.experimental.types.StitchParams`
-        for each field's meaning and default.  ``None`` (default) uses
-        all defaults.
+        Advanced tuning knobs as a mapping of key to value.
     inplace
         If ``True``, write back into ``sdata.tables[qc_table_key]``.
         Otherwise return the modified AnnData.

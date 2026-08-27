@@ -485,9 +485,7 @@ def calculate_tiling_qc(
         If ``True``, store result in ``sdata.tables``.  Otherwise
         return the AnnData directly.
     **tiling_qc_params
-        Advanced tuning knobs, passed as keyword arguments.  See
-        :class:`~squidpy.experimental.types.TilingQCParams` for each key's meaning
-        and default; omitted keys keep their default.
+        Advanced tuning knobs, passed as keyword arguments.
 
     Returns
     -------

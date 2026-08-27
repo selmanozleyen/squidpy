@@ -34,7 +34,7 @@ from squidpy.experimental.im._stain._decomposition import (
     decompose_to_concentrations,
     fit_decomposition,
 )
-from squidpy.experimental.im._stain._reference import StainMethod, StainReference
+from squidpy.experimental.im._stain._reference import StainMethod, StainReference, validate_stain_reference
 from squidpy.experimental.im._stain._reinhard import (
     ReinhardParams,
     _resolve_reinhard_params,
@@ -268,7 +268,7 @@ def fit_stain_reference(
 
     Returns
     -------
-    The fitted :class:`~squidpy.experimental.im.StainReference`. Nothing is written to ``sdata``.
+    The fitted :class:`~squidpy.experimental.types.StainReference`. Nothing is written to ``sdata``.
     """
     if method not in _VALID_METHODS:
         raise ValueError(f"Unknown method {method!r}; expected one of {list(_VALID_METHODS)}.")
@@ -314,14 +314,14 @@ def normalize_stains(
     image_key
         Key of the RGB image in ``sdata.images`` to normalize.
     reference
-        A :class:`~squidpy.experimental.im.StainReference` fitted with :func:`fit_stain_reference`.
-        Dispatch is on ``reference.method``.
+        A :class:`~squidpy.experimental.types.StainReference` fitted with :func:`fit_stain_reference`.
+        Dispatch is on its ``"method"`` key.
     scale
         Scale level to normalize. ``"auto"`` (default) uses the finest level
         so the result is not downsampled; source statistics are reduced
         lazily so memory stays bounded.
     method_params
-        Params matching ``reference.method`` (instance, mapping, or ``None``).
+        Params matching the reference's ``"method"`` (mapping or ``None``).
     image_key_added
         Key for the written image when ``inplace=True``. If ``None`` (default),
         ``f"{image_key}_normalized"`` is used. Ignored when ``inplace=False``.
@@ -355,7 +355,8 @@ def normalize_stains(
     target_key = image_key_added if image_key_added is not None else f"{image_key}_normalized"
     if inplace and target_key in sdata.images:
         raise ValueError(f"image_key_added={target_key!r} already exists in sdata.images.")
-    params = _resolve_method_params(reference.method, method_params)
+    reference = validate_stain_reference(reference)
+    params = _resolve_method_params(reference["method"], method_params)
     # Source statistics (Reinhard mu/sigma or the decomposition source matrix)
     # are reduced on a coarse level with a tissue mask; the lazy transform is
     # then applied to the full-resolution `da`.
@@ -363,7 +364,7 @@ def normalize_stains(
     validate_rgb_range(fit_rgb)  # reject mis-typed source (e.g. 0-255 float) before the dtype-clipped reconstruction
     tissue_mask = _resolve_tissue_bool_mask(sdata, image_key, fit_rgb, tissue_mask_key)
     out_dtype = da.dtype if output_dtype is None else np.dtype(output_dtype)  # clip range + final cast
-    if reference.method == "reinhard":
+    if reference["method"] == "reinhard":
         normalized = apply_reinhard(
             da, reference, params, fit_rgb=fit_rgb, tissue_mask=tissue_mask, out_dtype=out_dtype
         )
@@ -415,7 +416,7 @@ def decompose_stains(
     sdata, image_key
         The SpatialData object and the RGB image key to decompose.
     reference_or_method
-        Either a decomposition :class:`~squidpy.experimental.im.StainReference` (its stain matrix and
+        Either a decomposition :class:`~squidpy.experimental.types.StainReference` (its stain matrix and
         white point are used) or a method name (``"macenko"``/``"vahadane"``)
         to fit on this image first. The reference is the provenance record of
         how the maps were produced (method, stain matrix, white point).
@@ -451,11 +452,11 @@ def decompose_stains(
     ``"residual"`` unless dropped).
     """
     da = _resolve_image(sdata, image_key, scale, prefer="finest")
-    if isinstance(reference_or_method, StainReference):
-        reference = reference_or_method
-        if reference.method not in _DECOMPOSITION_METHODS or reference.stain_matrix is None:
+    if not isinstance(reference_or_method, str):
+        reference = validate_stain_reference(reference_or_method)
+        if reference["method"] not in _DECOMPOSITION_METHODS:
             raise ValueError("decompose_stains requires a macenko/vahadane reference with a stain matrix.")
-        stain_matrix, bg = reference.stain_matrix, reference.white_point
+        stain_matrix, bg = reference["stain_matrix"], reference["white_point"]
     else:
         if reference_or_method not in _DECOMPOSITION_METHODS:
             raise ValueError(f"method must be one of {list(_DECOMPOSITION_METHODS)}; got {reference_or_method!r}.")
@@ -468,7 +469,7 @@ def decompose_stains(
             white_point=white_point,
             tissue_mask_key=tissue_mask_key,
         )
-        stain_matrix, bg = reference.stain_matrix, reference.white_point
+        stain_matrix, bg = reference["stain_matrix"], reference["white_point"]
 
     names = ["hematoxylin", "eosin"] + (["residual"] if include_residual else [])
     prefix = image_key_added if image_key_added is not None else image_key

@@ -146,8 +146,6 @@ See the {doc}`extensibility guide </extensibility>` for how to implement a custo
 
 ## Experimental
 
-Parameter and result types live on their own page: {doc}`experimental_types`.
-
 ```{eval-rst}
 .. module:: squidpy.experimental
 .. currentmodule:: squidpy
@@ -164,4 +162,11 @@ Parameter and result types live on their own page: {doc}`experimental_types`.
     experimental.im.decompose_stains
     experimental.im.estimate_white_point
     experimental.im.detect_tissue
+```
+
+### Types
+
+```{eval-rst}
+.. automodule:: squidpy.experimental.types
+    :members:
 ```

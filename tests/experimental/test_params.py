@@ -8,6 +8,9 @@ import pytest
 from squidpy.experimental import types
 from squidpy.experimental.utils._params import Default, defaults_of
 
+#: Only the `*Params` types carry per-key defaults; the result types do not.
+PARAMS_TYPES = [name for name in types.__all__ if name.endswith("Params")]
+
 
 def _matches(value: object, hint: Any) -> bool:
     """Whether ``value`` satisfies ``hint``.
@@ -30,12 +33,12 @@ def _matches(value: object, hint: Any) -> bool:
 
 
 class TestDefaultsOf:
-    @pytest.mark.parametrize("name", types.__all__)
+    @pytest.mark.parametrize("name", PARAMS_TYPES)
     def test_every_key_has_a_default(self, name: str) -> None:
         cls = getattr(types, name)
         assert set(defaults_of(cls)) == set(cls.__annotations__)
 
-    @pytest.mark.parametrize("name", types.__all__)
+    @pytest.mark.parametrize("name", PARAMS_TYPES)
     def test_every_default_matches_its_declared_type(self, name: str) -> None:
         cls = getattr(types, name)
         for key, hint in get_type_hints(cls, include_extras=True).items():

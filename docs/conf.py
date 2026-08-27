@@ -192,7 +192,8 @@ def _params_defaults() -> dict[str, dict[str, object]]:
     from squidpy.experimental.utils._params import defaults_of
 
     defaults = {}
-    for name in types.__all__:
+    # only the `*Params` types carry per-key defaults; the result types do not
+    for name in (n for n in types.__all__ if n.endswith("Params")):
         cls = getattr(types, name)
         defaults[name] = dict(defaults_of(cls))
         cls.__annotations__ = {

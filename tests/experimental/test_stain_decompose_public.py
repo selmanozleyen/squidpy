@@ -53,9 +53,9 @@ class TestDecompositionThroughDispatchers:
     def test_fit_and_apply_end_to_end(self, method: str) -> None:
         sdata = _make_sdata(_synthetic_rgb(seed=1))
         ref = fit_stain_reference(sdata, "img", method=method, white_point=_WHITE)
-        assert ref.method == method
-        assert ref.stain_matrix.shape == (3, 3)
-        assert ref.max_concentrations.shape == (2,)
+        assert ref["method"] == method
+        assert ref["stain_matrix"].shape == (3, 3)
+        assert ref["max_concentrations"].shape == (2,)
 
         out = normalize_stains(sdata, "img", ref, inplace=False)
         assert isinstance(out, xr.DataArray)
@@ -134,14 +134,14 @@ class TestBackgroundDefault:
         sdata = _make_sdata(_synthetic_rgb())
         ref = fit_stain_reference(sdata, "img", method="macenko")
         # default I_0 is a fixed full-white point, not an image-derived estimate
-        np.testing.assert_array_equal(ref.white_point, [255.0, 255.0, 255.0])
+        np.testing.assert_array_equal(ref["white_point"], [255.0, 255.0, 255.0])
 
     def test_explicit_background_is_used(self) -> None:
         I0 = np.array([240.0, 245.0, 250.0])
         # build the synthetic image against this white point so the fit is consistent
         sdata = _make_sdata(_synthetic_rgb(white=I0))
         ref = fit_stain_reference(sdata, "img", method="vahadane", white_point=I0)
-        np.testing.assert_array_equal(ref.white_point, I0)
+        np.testing.assert_array_equal(ref["white_point"], I0)
 
 
 class TestUnknownMethod:
@@ -155,7 +155,7 @@ class TestDefaultMethodAndGate:
     def test_default_method_is_macenko(self) -> None:
         sdata = _make_sdata(_synthetic_rgb())
         ref = fit_stain_reference(sdata, "img")  # no method -> default
-        assert ref.method == "macenko"
+        assert ref["method"] == "macenko"
 
     def test_max_angle_deg_gate_too_strict_raises(self) -> None:
         # an impossibly tight tolerance trips the H/E sanity gate
@@ -168,7 +168,7 @@ class TestDefaultMethodAndGate:
         sdata = _make_sdata(_synthetic_rgb())
         default = fit_stain_reference(sdata, "img", method="macenko", white_point=_WHITE)
         custom = fit_stain_reference(sdata, "img", method="macenko", white_point=_WHITE, canonical_reference=RUIFROK_HE)
-        np.testing.assert_allclose(default.stain_matrix, custom.stain_matrix)
+        np.testing.assert_allclose(default["stain_matrix"], custom["stain_matrix"])
 
 
 class TestDecompositionOnHnE:
@@ -184,8 +184,8 @@ class TestDecompositionOnHnE:
         image_key = next(iter(sdata_hne.images))
         sq.experimental.im.detect_tissue(sdata_hne, image_key)
         ref = sq.experimental.im.fit_stain_reference(sdata_hne, image_key, method=method)
-        assert isinstance(ref, StainReference)
-        assert ref.stain_matrix.shape == (3, 3)
+        assert isinstance(ref, dict) and set(ref) == set(StainReference.__annotations__)
+        assert ref["stain_matrix"].shape == (3, 3)
         normalized = sq.experimental.im.normalize_stains(sdata_hne, image_key, ref, inplace=False)
         assert normalized.sizes["c"] == 3
         conc = sq.experimental.im.decompose_stains(sdata_hne, image_key, ref, inplace=False)

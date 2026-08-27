@@ -44,8 +44,8 @@ class TestFitStainReference:
     def test_end_to_end(self, rgb_values: np.ndarray) -> None:
         sdata = _make_sdata(rgb_values)
         ref = fit_stain_reference(sdata, "img", method="reinhard")
-        assert isinstance(ref, StainReference)
-        assert ref.method == "reinhard"
+        assert isinstance(ref, dict) and set(ref) == set(StainReference.__annotations__)
+        assert ref["method"] == "reinhard"
 
     def test_missing_image_key_raises(self, rgb_values: np.ndarray) -> None:
         sdata = _make_sdata(rgb_values)
@@ -191,7 +191,7 @@ class TestTissueMaskMandate:
         sdata_part.labels["img_tissue"] = Labels2DModel.parse(partial, dims=("y", "x"))
         ref_part = fit_stain_reference(sdata_part, "img", method="reinhard")
 
-        assert not np.allclose(ref_full.mu, ref_part.mu)
+        assert not np.allclose(ref_full["mu"], ref_part["mu"])
 
 
 class TestPreserveBackground:
@@ -223,7 +223,7 @@ class TestStainNormalizationOnHnE:
         image_key = next(iter(sdata_hne.images))
         sq.experimental.im.detect_tissue(sdata_hne, image_key)
         ref = sq.experimental.im.fit_stain_reference(sdata_hne, image_key, method="reinhard")
-        assert ref.method == "reinhard"
+        assert ref["method"] == "reinhard"
         out = sq.experimental.im.normalize_stains(sdata_hne, image_key, ref, inplace=False)
         assert "c" in out.dims
         assert out.sizes["c"] == 3
