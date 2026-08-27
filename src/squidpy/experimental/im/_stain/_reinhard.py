@@ -8,8 +8,7 @@ thin ``sdata`` wrapper lives in :mod:`._normalize`.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
-from typing import Any
+from typing import Any, TypedDict
 
 import numpy as np
 import xarray as xr
@@ -24,42 +23,48 @@ from squidpy.experimental.im._stain._conversion import (
 )
 from squidpy.experimental.im._stain._mask import as_spatial_mask, foreground_mask_from_lab
 from squidpy.experimental.im._stain._reference import StainReference
-from squidpy.experimental.im._utils import resolve_params
+from squidpy.experimental.utils._params import resolve_typed_params
 
 # Numerical safeguard against divide-by-zero on flat (constant-colour)
 # channels. Not a tuning knob, so kept off the public ReinhardParams surface.
 _SIGMA_FLOOR: float = 1e-6
 
 
-@dataclass(slots=True, frozen=True)
-class ReinhardParams:
+class ReinhardParams(TypedDict, total=False):
     """Tuning knobs for Reinhard stain normalization.
 
-    Pass an instance (or a ``Mapping`` of field names to values) as
-    ``method_params``. Frozen so validation in ``__post_init__`` cannot be
-    silently bypassed by later mutation.
+    Pass a mapping of these keys as ``method_params``; every key is optional
+    and falls back to :data:`_REINHARD_DEFAULTS`. Values are coerced and
+    range-checked by :func:`validate_reinhard_params` when resolved.
+
+    - ``luminosity_threshold`` -- normalised Ruderman Lab-L cutoff in ``(0, 1]``;
+      pixels brighter than this are excluded from the fit.
+    - ``mask_background`` -- if ``True``, fit channel statistics over tissue
+      pixels only; if ``False``, use every pixel (vanilla Reinhard).
     """
 
-    luminosity_threshold: float = DEFAULT_LUMINOSITY_THRESHOLD
-    """Normalised Ruderman Lab-L cutoff in ``(0, 1]``; pixels brighter than this are excluded from the fit."""
-
-    mask_background: bool = True
-    """If ``True``, fit channel statistics over tissue pixels only; if ``False``, use every pixel (vanilla Reinhard)."""
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "luminosity_threshold", float(self.luminosity_threshold))
-        object.__setattr__(self, "mask_background", bool(self.mask_background))
-        if not 0.0 < self.luminosity_threshold <= 1.0:
-            raise ValueError(f"`luminosity_threshold` must be in (0, 1], got {self.luminosity_threshold}.")
+    luminosity_threshold: float
+    mask_background: bool
 
 
-_REINHARD_DEFAULTS = ReinhardParams()
-_REINHARD_FIELDS = frozenset(f.name for f in fields(ReinhardParams))
+#: Annotated with the TypedDict so the type checker verifies every default.
+_REINHARD_DEFAULTS: ReinhardParams = {
+    "luminosity_threshold": DEFAULT_LUMINOSITY_THRESHOLD,
+    "mask_background": True,
+}
+
+
+def validate_reinhard_params(params: dict[str, Any]) -> None:
+    """Coerce ``params`` in place and range-check it. Raises on invalid values."""
+    params["luminosity_threshold"] = float(params["luminosity_threshold"])
+    params["mask_background"] = bool(params["mask_background"])
+    if not 0.0 < params["luminosity_threshold"] <= 1.0:
+        raise ValueError(f"`luminosity_threshold` must be in (0, 1], got {params['luminosity_threshold']}.")
 
 
 def _resolve_reinhard_params(method_params: ReinhardParams | Mapping[str, Any] | None) -> ReinhardParams:
-    """Normalise the ``method_params`` argument to a :class:`ReinhardParams` instance."""
-    return resolve_params(method_params, ReinhardParams, _REINHARD_DEFAULTS, _REINHARD_FIELDS)
+    """Normalise the ``method_params`` argument to a validated :class:`ReinhardParams`."""
+    return resolve_typed_params(method_params, defaults=_REINHARD_DEFAULTS, validate=validate_reinhard_params)
 
 
 def _masked_channel_stats(lab: xr.DataArray, mask: xr.DataArray | None) -> tuple[np.ndarray, np.ndarray]:
@@ -104,11 +109,15 @@ def _transfer_kernel(
 
 def _reinhard_mask(lab: xr.DataArray, params: ReinhardParams, tissue_mask: np.ndarray | None) -> xr.DataArray | None:
     """Resolve the tissue mask for the Reinhard stats: external mask wins, else
-    the param-driven luminosity mask (or ``None`` for vanilla Reinhard)."""
+    the param-driven luminosity mask (or ``None`` for vanilla Reinhard).
+
+    ``params`` is resolved here rather than assumed complete: :class:`ReinhardParams`
+    is ``total=False``, so a caller may legitimately pass a partial mapping."""
+    params = _resolve_reinhard_params(params)
     if tissue_mask is not None:
         return as_spatial_mask(tissue_mask, lab)
-    if params.mask_background:
-        return foreground_mask_from_lab(lab, params.luminosity_threshold)
+    if params["mask_background"]:
+        return foreground_mask_from_lab(lab, params["luminosity_threshold"])
     return None
 
 

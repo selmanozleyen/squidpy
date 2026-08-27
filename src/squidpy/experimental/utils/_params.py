@@ -6,9 +6,9 @@ without notice.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import fields
-from typing import Any
+from typing import Any, cast
 
 
 def resolve_params[T](value: T | Mapping[str, Any] | None, cls: type[T], *, label: str) -> T:
@@ -36,3 +36,35 @@ def resolve_params[T](value: T | Mapping[str, Any] | None, cls: type[T], *, labe
             raise ValueError(f"Unknown {label} field(s): {sorted(unknown)}; expected from {sorted(valid)}.")
         return cls(**value)
     raise TypeError(f"{label} must be {cls.__name__}, Mapping, or None; got {type(value).__name__}.")
+
+
+def resolve_typed_params[T: Mapping[str, Any]](
+    params: T | Mapping[str, Any] | None,
+    *,
+    defaults: T,
+    validate: Callable[[dict[str, Any]], None] | None = None,
+    arg_name: str = "method_params",
+) -> T:
+    """Merge a params mapping over ``defaults`` and validate the result.
+
+    ``T`` is a :class:`~typing.TypedDict`, so callers get static key and value
+    checking at the call site; this function is the dynamic half. Unknown keys
+    are named rather than silently ignored (a plain ``dict`` would accept them),
+    and ``validate`` -- which coerces in place and range-checks -- runs on the
+    *merged* mapping, so the defaults are checked on every call rather than
+    trusted.
+
+    Returns a new mapping; neither ``params`` nor ``defaults`` is mutated.
+    """
+    if params is not None and not isinstance(params, Mapping):
+        raise TypeError(f"`{arg_name}` must be a Mapping or None; got {type(params).__name__}.")
+    if params:
+        unknown = set(params) - set(defaults)
+        if unknown:
+            raise ValueError(
+                f"Unknown `{arg_name}` field(s): {sorted(unknown)}; expected from {sorted(defaults)}."
+            )
+    merged = {**defaults, **(params or {})}
+    if validate is not None:
+        validate(merged)
+    return cast("T", merged)
