@@ -29,7 +29,10 @@
     {%- endif %}
     {%- endblock %}
     {% block attributes %}
-    {%- if attributes %}
+    {#- When `:members:` is in play above, autodoc has already rendered each
+        attribute inline *with its type*. A summary table would repeat all of
+        them untyped, so emit it only for classes that keep the table form. #}
+    {%- if attributes and shown_methods %}
     .. rubric:: {{ _('Attributes') }}
 
     .. autosummary::

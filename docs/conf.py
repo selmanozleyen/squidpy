@@ -169,7 +169,46 @@ html_theme_options = {"navigation_depth": 4, "logo_only": True}
 html_show_sphinx = False
 
 
+# The `*Params` TypedDicts keep their defaults in a sibling `_*_DEFAULTS` mapping
+# rather than on the class (a TypedDict cannot carry values), so autodoc has no
+# default to show. Read it from that mapping at build time -- one source of truth,
+# no defaults duplicated into docstrings where they could drift.
+_PARAMS_DEFAULTS: dict[str, str] = {
+    "squidpy.experimental.im.BackgroundDetectionParams": "_BACKGROUND_DEFAULTS",
+    "squidpy.experimental.im.FelzenszwalbParams": "_FELZENSZWALB_DEFAULTS",
+    "squidpy.experimental.im.WekaParams": "_WEKA_DEFAULTS",
+    "squidpy.experimental.im.ReinhardParams": "_REINHARD_DEFAULTS",
+    "squidpy.experimental.im.MacenkoParams": "_MACENKO_DEFAULTS",
+    "squidpy.experimental.im.VahadaneParams": "_VAHADANE_DEFAULTS",
+    "squidpy.experimental.tl.TilingQCParams": "_QC_DEFAULTS",
+    "squidpy.experimental.tl.StitchParams": "_STITCH_DEFAULTS",
+}
+
+
+def _append_default(app, what, name, obj, options, lines) -> None:  # type: ignore[no-untyped-def]
+    """Append ``Default: <repr>`` to each documented params key."""
+    if what != "attribute" or "." not in name:
+        return
+    cls_path, _, key = name.rpartition(".")
+    defaults_name = _PARAMS_DEFAULTS.get(cls_path)
+    if defaults_name is None:
+        return
+    import importlib
+
+    module_path, _, cls_name = cls_path.rpartition(".")
+    try:
+        cls = getattr(importlib.import_module(module_path), cls_name)
+        defaults = getattr(importlib.import_module(cls.__module__), defaults_name)
+    except (ImportError, AttributeError):
+        return
+    if key in defaults:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(f"Default: ``{defaults[key]!r}``")
+
+
 def setup(app: Sphinx) -> None:
+    app.connect("autodoc-process-docstring", _append_default)
     app.add_css_file("css/custom.css")
     app.add_css_file("css/sphinx_gallery.css")
     app.add_css_file("css/nbsphinx.css")
