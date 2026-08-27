@@ -44,18 +44,24 @@ class BackgroundDetectionParams(TypedDict, total=False):
     """Which corners are background, and how large the corner boxes should be.
 
     If no corners are flagged ``True``, orientation falls back to bright
-    background -- see :func:`any_corner`.
-
-    - ``ymin_xmin_is_bg``, ``ymax_xmin_is_bg``, ``ymin_xmax_is_bg``,
-      ``ymax_xmax_is_bg`` -- whether each corner is background.
-    - ``corner_size_pct`` -- corner box size as a fraction of height/width.
+    background -- see ``any_corner``.
     """
 
     ymin_xmin_is_bg: bool
+    """Whether the ``(ymin, xmin)`` corner is background."""
+
     ymax_xmin_is_bg: bool
+    """Whether the ``(ymax, xmin)`` corner is background."""
+
     ymin_xmax_is_bg: bool
+    """Whether the ``(ymin, xmax)`` corner is background."""
+
     ymax_xmax_is_bg: bool
+    """Whether the ``(ymax, xmax)`` corner is background."""
+
     corner_size_pct: float
+    """Corner box size as a fraction of height/width."""
+
 
 
 def any_corner(params: BackgroundDetectionParams) -> bool:
@@ -72,46 +78,68 @@ def any_corner(params: BackgroundDetectionParams) -> bool:
 
 class FelzenszwalbParams(TypedDict, total=False):
     """Size-aware superpixel defaults for felzenszwalb segmentation.
-
-    - ``grid_rows``, ``grid_cols`` -- target superpixel grid.
-    - ``sigma_frac`` -- blur = this * short side, clipped to ``[1, 5]`` px.
-    - ``scale_coef`` -- ``scale`` = coef * target_area.
-    - ``min_size_coef`` -- ``min_size`` = coef * target_area.
     """
 
     grid_rows: int
+    """Target superpixel grid rows."""
+
     grid_cols: int
+    """Target superpixel grid columns."""
+
     sigma_frac: float
+    """Blur = this * short side, clipped to ``[1, 5]`` px."""
+
     scale_coef: float
+    """``scale`` = coef * target_area."""
+
     min_size_coef: float
+    """``min_size`` = coef * target_area."""
+
 
 
 class WekaParams(TypedDict, total=False):
     """Parameters for WEKA-like trainable segmentation.
-
-    - ``sigma_min``, ``sigma_max``, ``edges`` -- multiscale feature bank.
-    - ``pseudo_tissue_percentile`` -- percentile of distance-from-bg to label as tissue.
-    - ``pseudo_min_pixels`` -- minimum number of tissue pixels to seed.
-    - ``rf_estimators``, ``rf_max_depth``, ``rf_max_samples`` -- random-forest controls.
-    - ``rng`` -- source of randomness; ``None`` draws from OS entropy.
-    - ``refine_with_classifier``, ``refine_n_samples_per_class``,
-      ``refine_bg_prob_threshold`` -- second-stage background refinement.
-    - ``border_margin_px`` -- border ignored when seeding and predicting.
     """
 
     sigma_min: float
+    """Smallest scale in the multiscale feature bank."""
+
     sigma_max: float
+    """Largest scale in the multiscale feature bank."""
+
     edges: bool
+    """Include edge features."""
+
     pseudo_tissue_percentile: float
+    """Percentile of distance-from-bg to label as tissue."""
+
     pseudo_min_pixels: int
+    """Minimum number of tissue pixels to seed."""
+
     rf_estimators: int
+    """Number of trees in the random forest."""
+
     rf_max_depth: int | None
+    """Maximum tree depth; ``None`` for unlimited."""
+
     rf_max_samples: float
+    """Fraction of samples drawn to train each tree."""
+
     rng: SeedLike | RNGLike | None
+    """Source of randomness; ``None`` draws from OS entropy."""
+
     refine_with_classifier: bool
+    """Run the second-stage background refinement."""
+
     refine_n_samples_per_class: int
+    """Training samples drawn per class in the refinement step."""
+
     refine_bg_prob_threshold: float
+    """Only drop pixels whose background probability exceeds this."""
+
     border_margin_px: int | Sequence[int]
+    """Border ignored when seeding and predicting."""
+
 
 
 #: Annotated with the TypedDicts so the type checker verifies every default.

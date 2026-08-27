@@ -34,17 +34,15 @@ class ReinhardParams(TypedDict, total=False):
     """Tuning knobs for Reinhard stain normalization.
 
     Pass a mapping of these keys as ``method_params``; every key is optional
-    and falls back to :data:`_REINHARD_DEFAULTS`. Values are coerced and
-    range-checked by :func:`validate_reinhard_params` when resolved.
-
-    - ``luminosity_threshold`` -- normalised Ruderman Lab-L cutoff in ``(0, 1]``;
-      pixels brighter than this are excluded from the fit.
-    - ``mask_background`` -- if ``True``, fit channel statistics over tissue
-      pixels only; if ``False``, use every pixel (vanilla Reinhard).
+    and falls back to ``_REINHARD_DEFAULTS``. Values are coerced and
+    range-checked by ``validate_reinhard_params`` when resolved.
     """
 
     luminosity_threshold: float
+    """Normalised Ruderman Lab-L cutoff in ``(0, 1]``; pixels brighter than this are excluded from the fit."""
+
     mask_background: bool
+    """If ``True``, fit channel statistics over tissue pixels only; if ``False``, use every pixel (vanilla Reinhard)."""
 
 
 #: Annotated with the TypedDict so the type checker verifies every default.

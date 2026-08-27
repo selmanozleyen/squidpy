@@ -39,30 +39,32 @@ _MAXC_FLOOR = 1e-6
 
 class MacenkoParams(TypedDict, total=False):
     """Tuning knobs for Macenko stain-matrix fitting.
-
-    - ``alpha`` -- angular percentile (deg) for the two stain directions; the
-      extremes are taken at ``alpha`` / ``100 - alpha``.
-    - ``beta`` -- mean-absorbance cutoff selecting tissue pixels (optical-density space).
     """
 
     alpha: float
+    """Angular percentile (deg) for the two stain directions; the extremes are taken at ``alpha`` / ``100 - alpha``."""
+
     beta: float
+    """Mean-absorbance cutoff selecting tissue pixels (optical-density space)."""
+
 
 
 class VahadaneParams(TypedDict, total=False):
     """Tuning knobs for Vahadane (sparse-NMF) stain-matrix fitting.
-
-    - ``beta`` -- mean-absorbance cutoff selecting tissue pixels (optical-density space).
-    - ``lambda1`` -- L1 sparsity regularisation on the concentration factor of the NMF.
-    - ``n_iter`` -- maximum NMF iterations.
-    - ``rng`` -- source of randomness for NMF initialisation tie-breaking;
-      ``None`` draws from OS entropy.
     """
 
     beta: float
+    """Mean-absorbance cutoff selecting tissue pixels (optical-density space)."""
+
     lambda1: float
+    """L1 sparsity regularisation on the concentration factor of the NMF."""
+
     n_iter: int
+    """Maximum NMF iterations."""
+
     rng: SeedLike | RNGLike | None
+    """Source of randomness for NMF initialisation tie-breaking; ``None`` draws from OS entropy."""
+
 
 
 #: Annotated with the TypedDicts so the type checker verifies every default.

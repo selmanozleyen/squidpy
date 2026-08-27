@@ -60,20 +60,18 @@ class TilingQCParams(TypedDict, total=False):
     """Advanced tuning knobs for :func:`~squidpy.experimental.tl.calculate_tiling_qc`.
 
     Pass a mapping of these keys as ``tiling_qc_params``; every key is optional
-    and falls back to :data:`_QC_DEFAULTS`. Values are coerced and range-checked
-    by :func:`validate_qc_params` when resolved.
-
-    - ``distance_tol`` -- maximum perpendicular distance (pixels) from the fitted
-      line for a contour point to count as straight.
-    - ``min_area`` -- cells smaller than this (pixels at analysis resolution) are
-      skipped (NaN scores).
-    - ``max_contour_points`` -- cap on contour resolution; longer contours are
-      arc-length-resampled before the O(n^2) collinearity scan.
+    and falls back to ``_QC_DEFAULTS``. Values are coerced and range-checked by
+    ``validate_qc_params`` when resolved.
     """
 
     distance_tol: float
+    """Maximum perpendicular distance (pixels) from the fitted line for a contour point to count as straight."""
+
     min_area: int
+    """Cells smaller than this (pixels at analysis resolution) are skipped (NaN scores)."""
+
     max_contour_points: int
+    """Cap on contour resolution; longer contours are arc-length-resampled before the O(n^2) collinearity scan."""
 
 
 #: Annotated with the TypedDict so the type checker verifies every default.

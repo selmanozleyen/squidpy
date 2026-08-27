@@ -58,27 +58,30 @@ class StitchParams(TypedDict, total=False):
 
     Defaults work for typical 2D segmentation tiles produced by cellpose-like
     pipelines. Pass a mapping of these keys as ``stitch_params``; every key is
-    optional and falls back to :data:`_STITCH_DEFAULTS`. Values are coerced and
-    range-checked by :func:`validate_stitch_params` when resolved. These are
+    optional and falls back to ``_STITCH_DEFAULTS``. Values are coerced and
+    range-checked by ``validate_stitch_params`` when resolved. These are
     advanced knobs -- the defaults rarely need changing.
-
-    - ``distance_tol`` -- sub-pixel tolerance for "lies on a bbox edge".
-    - ``min_edge_length`` -- absolute floor on cut-edge length (pixels).
-    - ``min_edge_length_ratio`` -- minimum cut-edge length relative to the cell's
-      equivalent diameter.
-    - ``min_edge_coverage`` -- minimum fraction of parallel-axis positions covered
-      by near-edge contour points.
-    - ``candidate_min_iou`` -- loose 1-D IoU floor at candidate enumeration.
-    - ``close_radius`` -- morphological closing disk radius for the union mask.
-      Also the length scale for ``gap_proximity`` (normalised by ``2 * close_radius``).
     """
 
     distance_tol: float
+    """Sub-pixel tolerance for "lies on a bbox edge"."""
+
     min_edge_length: float
+    """Absolute floor on cut-edge length (pixels)."""
+
     min_edge_length_ratio: float
+    """Minimum cut-edge length relative to the cell's equivalent diameter."""
+
     min_edge_coverage: float
+    """Minimum fraction of parallel-axis positions covered by near-edge contour points."""
+
     candidate_min_iou: float
+    """Loose 1-D IoU floor at candidate enumeration."""
+
     close_radius: int
+    """Morphological closing disk radius for the union mask. Also the length scale for
+    ``gap_proximity`` (normalised by ``2 * close_radius``)."""
+
 
 
 #: Annotated with the TypedDict so the type checker verifies every default.
