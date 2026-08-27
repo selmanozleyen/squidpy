@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Unpack
 
 import numpy as np
 import spatialdata as sd
@@ -705,8 +705,8 @@ def assign_stitch_groups(
     min_confidence: float = 0.7,
     max_gap: float = 3.0,
     max_group_size: int = 4,
-    stitch_params: StitchParams | Mapping[str, Any] | None = None,
     inplace: bool = True,
+    **stitch_params: Unpack[StitchParams],
 ) -> ad.AnnData | None:
     """Assign tile-cut cell pieces to stitch groups.
 
@@ -745,11 +745,11 @@ def assign_stitch_groups(
     max_group_size
         Cap on group size; oversized groups (likely false merges) collapse
         to singletons.
-    stitch_params
-        Advanced tuning knobs as a mapping of key to value.
     inplace
         If ``True``, write back into ``sdata.tables[qc_table_key]``.
         Otherwise return the modified AnnData.
+    **stitch_params
+        Advanced tuning knobs, passed as keyword arguments.
 
     Returns
     -------

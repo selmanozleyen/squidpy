@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import enum
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, cast
+from typing import Any, Literal, Unpack, cast
 
 import dask.array as da
 import numpy as np
@@ -185,7 +185,6 @@ def detect_tissue(
     method: DetectTissueMethod | str = DetectTissueMethod.OTSU,
     method_params: FelzenszwalbParams | WekaParams | Mapping[str, Any] | None = None,
     channel_format: Literal["infer", "rgb", "rgba", "multichannel"] = "infer",
-    background_detection_params: BackgroundDetectionParams | None = None,
     corners_are_background: bool = True,
     border_margin_px: int | Sequence[int] = 0,
     min_specimen_area_frac: float = 0.01,
@@ -195,6 +194,7 @@ def detect_tissue(
     mask_smoothing_cycles: int = 0,
     new_labels_key: str | None = None,
     inplace: bool = True,
+    **background_detection_params: Unpack[BackgroundDetectionParams],
 ) -> np.ndarray | None:
     """
     Detect tissue regions in an image and optionally store an integer-labeled mask.
@@ -234,12 +234,10 @@ def detect_tissue(
             - `"rgba"` - RGBA image.
             - `"multichannel"` - Multi-channel image.
 
-    background_detection_params
-        Parameters for background detection via corner regions. If `None`, uses corners
-        specified by `corners_are_background` for all four corners.
     corners_are_background
-        Whether corners are considered background regions. Used for orienting threshold
-        if `background_detection_params` is `None`.
+        Whether corners are considered background regions, used for orienting the
+        threshold. Applies to all four corners; override individual corners through
+        ``**background_detection_params``.
     min_specimen_area_frac
         Minimum fraction of image area for a region to be considered a specimen.
     n_samples
@@ -255,6 +253,9 @@ def detect_tissue(
     new_labels_key
         Key to store the resulting labels in ``sdata.labels``. If `None`, uses
         `"{image_key}_tissue"`.
+    **background_detection_params
+        Per-corner background priors and corner-box size, passed as keyword arguments.
+        Each corner flag defaults to ``corners_are_background``.
     inplace
         If `True`, stores labels in ``sdata.labels``. If `False`, returns the mask array.
 
@@ -296,14 +297,14 @@ def detect_tissue(
         raise ValueError(f"Unsupported method: {method}")
 
     # Background params
+    corner_priors = BackgroundDetectionParams(
+        ymin_xmin_is_bg=corners_are_background,
+        ymax_xmin_is_bg=corners_are_background,
+        ymin_xmax_is_bg=corners_are_background,
+        ymax_xmax_is_bg=corners_are_background,
+    )
     bgp = resolve_params(
-        background_detection_params
-        or BackgroundDetectionParams(
-            ymin_xmin_is_bg=corners_are_background,
-            ymax_xmin_is_bg=corners_are_background,
-            ymin_xmax_is_bg=corners_are_background,
-            ymax_xmax_is_bg=corners_are_background,
-        ),
+        {**corner_priors, **background_detection_params},  # an explicit corner wins over the broadcast
         defaults=_BACKGROUND_DEFAULTS,
         arg_name="background_detection_params",
     )
