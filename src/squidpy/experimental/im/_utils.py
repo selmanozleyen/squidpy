@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Literal
 
 import dask.array as da
@@ -361,3 +362,30 @@ def save_tile_grid_to_shapes(
         transformations = get_transformation(sdata.images[copy_transforms_from_key], get_all=True)
         set_transformation(sdata.shapes[shapes_key], transformations, set_all=True)
     logger.info(f"- Saved tile grid as 'sdata.shapes[\"{shapes_key}\"]'")
+
+
+def resolve_params[T](
+    params: T | Mapping[str, Any] | None,
+    cls: type[T],
+    defaults: T,
+    valid_fields: frozenset[str],
+    *, arg_name: str = "method_params",
+) -> T:
+    """Normalise a params argument to a ``cls`` instance.
+
+    Accepts ``None`` (the shared default instance), a ``cls`` instance
+    (passed through), or a mapping of its fields. Unknown keys are named
+    rather than surfacing as a bare ``TypeError`` from ``cls(**mapping)``.
+    """
+    if params is None:
+        return defaults
+    if isinstance(params, cls):
+        return params
+    if isinstance(params, Mapping):
+        unknown = set(params) - valid_fields
+        if unknown:
+            raise ValueError(
+                f"Unknown `{arg_name}` field(s): {sorted(unknown)}; expected from {sorted(valid_fields)}."
+            )
+        return cls(**params)
+    raise TypeError(f"`{arg_name}` must be {cls.__name__}, Mapping, or None; got {type(params).__name__}.")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import enum
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, Literal, cast
 
 import dask.array as da
@@ -31,7 +31,7 @@ from squidpy._utils import (
     legacy_random,
 )
 
-from ._utils import flatten_channels, get_element_data
+from ._utils import flatten_channels, get_element_data, resolve_params
 
 
 class DetectTissueMethod(enum.Enum):
@@ -98,6 +98,13 @@ class WekaParams:
     refine_with_classifier: bool = True
     refine_n_samples_per_class: int = 50_000
     refine_bg_prob_threshold: float = 0.6  # only drop pixels very likely to be background
+
+
+#: The params dataclass each method takes. OTSU is absent: it accepts none.
+_METHOD_PARAMS: dict[DetectTissueMethod, type[FelzenszwalbParams] | type[WekaParams]] = {
+    DetectTissueMethod.FELZENSZWALB: FelzenszwalbParams,
+    DetectTissueMethod.WEKA: WekaParams,
+}
 
 
 def _normalize_margins(
@@ -325,29 +332,10 @@ def detect_tissue(
         if method_params is not None:
             raise ValueError("`method_params` are not supported for OTSU tissue detection.")
         resolved_method_params = None
-    elif method == DetectTissueMethod.FELZENSZWALB:
-        if method_params is None:
-            resolved_method_params = FelzenszwalbParams()
-        elif isinstance(method_params, FelzenszwalbParams):
-            resolved_method_params = method_params
-        elif isinstance(method_params, Mapping):
-            resolved_method_params = FelzenszwalbParams(**method_params)
-        else:
-            raise TypeError(
-                f"`method_params` for 'felzenszwalb' must be a FelzenszwalbParams or mapping, "
-                f"got {type(method_params).__name__}.",
-            )
-    elif method == DetectTissueMethod.WEKA:
-        if method_params is None:
-            resolved_method_params = WekaParams()
-        elif isinstance(method_params, WekaParams):
-            resolved_method_params = method_params
-        elif isinstance(method_params, Mapping):
-            resolved_method_params = WekaParams(**method_params)
-        else:
-            raise TypeError(
-                f"`method_params` for 'weka' must be a WekaParams or mapping, got {type(method_params).__name__}.",
-            )
+    elif (params_cls := _METHOD_PARAMS.get(method)) is not None:
+        resolved_method_params = resolve_params(
+            method_params, params_cls, params_cls(), frozenset(f.name for f in fields(params_cls))
+        )
     else:
         raise ValueError(f"Unsupported method: {method}")
 

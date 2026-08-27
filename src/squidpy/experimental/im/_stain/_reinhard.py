@@ -24,6 +24,7 @@ from squidpy.experimental.im._stain._conversion import (
 )
 from squidpy.experimental.im._stain._mask import as_spatial_mask, foreground_mask_from_lab
 from squidpy.experimental.im._stain._reference import StainReference
+from squidpy.experimental.im._utils import resolve_params
 
 # Numerical safeguard against divide-by-zero on flat (constant-colour)
 # channels. Not a tuning knob, so kept off the public ReinhardParams surface.
@@ -58,18 +59,7 @@ _REINHARD_FIELDS = frozenset(f.name for f in fields(ReinhardParams))
 
 def _resolve_reinhard_params(method_params: ReinhardParams | Mapping[str, Any] | None) -> ReinhardParams:
     """Normalise the ``method_params`` argument to a :class:`ReinhardParams` instance."""
-    if method_params is None:
-        return _REINHARD_DEFAULTS
-    if isinstance(method_params, ReinhardParams):
-        return method_params
-    if isinstance(method_params, Mapping):
-        unknown = set(method_params) - _REINHARD_FIELDS
-        if unknown:
-            raise ValueError(
-                f"Unknown `method_params` field(s): {sorted(unknown)}; expected from {sorted(_REINHARD_FIELDS)}."
-            )
-        return ReinhardParams(**method_params)
-    raise TypeError(f"`method_params` must be ReinhardParams, Mapping, or None; got {type(method_params).__name__}.")
+    return resolve_params(method_params, ReinhardParams, _REINHARD_DEFAULTS, _REINHARD_FIELDS)
 
 
 def _masked_channel_stats(lab: xr.DataArray, mask: xr.DataArray | None) -> tuple[np.ndarray, np.ndarray]:

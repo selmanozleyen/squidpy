@@ -32,6 +32,7 @@ from squidpy.experimental.im._stain._validation import (
     reorder_to_canonical,
     validate_stain_matrix,
 )
+from squidpy.experimental.im._utils import resolve_params
 
 _MAXC_PERCENTILE = 99.0
 _MAXC_FLOOR = 1e-6
@@ -90,27 +91,12 @@ _MACENKO_FIELDS = frozenset(f.name for f in fields(MacenkoParams))
 _VAHADANE_FIELDS = frozenset(f.name for f in fields(VahadaneParams))
 
 
-def _resolve_params(params: Any, cls: type, defaults: Any, valid_fields: frozenset[str]) -> Any:
-    if params is None:
-        return defaults
-    if isinstance(params, cls):
-        return params
-    if isinstance(params, Mapping):
-        unknown = set(params) - valid_fields
-        if unknown:
-            raise ValueError(
-                f"Unknown `method_params` field(s): {sorted(unknown)}; expected from {sorted(valid_fields)}."
-            )
-        return cls(**params)
-    raise TypeError(f"`method_params` must be {cls.__name__}, Mapping, or None; got {type(params).__name__}.")
-
-
 def _resolve_macenko_params(params: MacenkoParams | Mapping[str, Any] | None) -> MacenkoParams:
-    return _resolve_params(params, MacenkoParams, _MACENKO_DEFAULTS, _MACENKO_FIELDS)
+    return resolve_params(params, MacenkoParams, _MACENKO_DEFAULTS, _MACENKO_FIELDS)
 
 
 def _resolve_vahadane_params(params: VahadaneParams | Mapping[str, Any] | None) -> VahadaneParams:
-    return _resolve_params(params, VahadaneParams, _VAHADANE_DEFAULTS, _VAHADANE_FIELDS)
+    return resolve_params(params, VahadaneParams, _VAHADANE_DEFAULTS, _VAHADANE_FIELDS)
 
 
 def _tissue_od(
