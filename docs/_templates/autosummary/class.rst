@@ -12,6 +12,11 @@
 {%- set shown_methods = own_methods + dunders %}
 
 .. autoclass:: {{ objname }}
+{%- if attributes and not shown_methods %}
+    :members:
+    :undoc-members:
+    :exclude-members: {{ dict_api | join(', ') }}
+{%- endif %}
     {% block methods %}
     {%- if shown_methods %}
     .. rubric:: {{ _('Methods') }}
