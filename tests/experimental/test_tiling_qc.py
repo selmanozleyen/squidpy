@@ -174,7 +174,7 @@ class TestCalculateTilingQC:
 
     def test_invalid_nmads_raises(self, sdata_tile_boundary):
         sdata, _ = sdata_tile_boundary
-        with pytest.raises(ValueError, match="nmads_cut must be positive"):
+        with pytest.raises(ValueError, match="`nmads_cut` to be positive"):
             sq.experimental.tl.calculate_tiling_qc(
                 sdata,
                 labels_key="labels",
@@ -182,7 +182,7 @@ class TestCalculateTilingQC:
                 inplace=False,
                 nmads_cut=0,
             )
-        with pytest.raises(ValueError, match="nmads_smoothed must be positive"):
+        with pytest.raises(ValueError, match="`nmads_smoothed` to be positive"):
             sq.experimental.tl.calculate_tiling_qc(
                 sdata,
                 labels_key="labels",

@@ -36,7 +36,7 @@ from skimage.measure import label as cc_label
 from skimage.morphology import disk as morph_disk
 from spatialdata._logging import logger as logg
 
-from squidpy._validators import assert_in_range, assert_non_negative
+from squidpy._validators import assert_in_range, assert_non_negative, assert_positive
 from squidpy.experimental.types import _STITCH_DEFAULTS, StitchParams
 from squidpy.experimental.utils._labels import iter_chunked_regionprops, resolve_labels_array
 from squidpy.experimental.utils._params import resolve_params
@@ -758,12 +758,9 @@ def assign_stitch_groups(
     """
     if labels_key not in sdata.labels:
         raise ValueError(f"Labels key '{labels_key}' not found in sdata.labels.")
-    if min_confidence < 0 or min_confidence > 1:
-        raise ValueError(f"min_confidence must be in [0, 1], got {min_confidence}.")
-    if max_gap < 0:
-        raise ValueError(f"max_gap must be non-negative, got {max_gap}.")
-    if max_group_size < 1:
-        raise ValueError(f"max_group_size must be >= 1, got {max_group_size}.")
+    assert_in_range(min_confidence, 0.0, 1.0, name="min_confidence")
+    assert_non_negative(max_gap, name="max_gap")
+    assert_positive(max_group_size, name="max_group_size")
     params = _resolve_stitch_params(stitch_params)
 
     table_key = qc_table_key if qc_table_key is not None else f"{labels_key}_qc"

@@ -524,12 +524,11 @@ def calculate_tiling_qc(
         raise ValueError(f"Labels key '{labels_key}' not found, valid keys: {list(sdata.labels.keys())}")
     if not outlier_use_cut and not outlier_use_smoothed:
         raise ValueError("At least one outlier gate must be enabled (outlier_use_cut or outlier_use_smoothed).")
-    if outlier_use_cut and nmads_cut <= 0:
-        raise ValueError(f"nmads_cut must be positive, got {nmads_cut}.")
-    if outlier_use_smoothed and nmads_smoothed <= 0:
-        raise ValueError(f"nmads_smoothed must be positive, got {nmads_smoothed}.")
-    if n_neighbors < 1:
-        raise ValueError(f"n_neighbors must be >= 1, got {n_neighbors}.")
+    if outlier_use_cut:
+        assert_positive(nmads_cut, name="nmads_cut")
+    if outlier_use_smoothed:
+        assert_positive(nmads_smoothed, name="nmads_smoothed")
+    assert_positive(n_neighbors, name="n_neighbors")
     qc_params = _resolve_qc_params(tiling_qc_params)
 
     labels_da = resolve_labels_array(sdata, labels_key, scale)
