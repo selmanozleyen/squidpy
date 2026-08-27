@@ -145,6 +145,9 @@ See the {doc}`extensibility guide </extensibility>` for how to implement a custo
 ```
 
 ## Experimental
+
+Parameter and result types live on their own page: {doc}`experimental_types`.
+
 ```{eval-rst}
 .. module:: squidpy.experimental
 .. currentmodule:: squidpy
@@ -153,21 +156,12 @@ See the {doc}`extensibility guide </extensibility>` for how to implement a custo
 
     experimental.im.calculate_image_features
     experimental.tl.calculate_tiling_qc
-    experimental.tl.TilingQCParams
     experimental.tl.assign_stitch_groups
-    experimental.tl.StitchParams
     experimental.tl.make_stitched_labels
     experimental.pl.tiling_qc
     experimental.im.fit_stain_reference
     experimental.im.normalize_stains
     experimental.im.decompose_stains
     experimental.im.estimate_white_point
-    experimental.im.StainReference
-    experimental.im.ReinhardParams
-    experimental.im.MacenkoParams
-    experimental.im.VahadaneParams
     experimental.im.detect_tissue
-    experimental.im.BackgroundDetectionParams
-    experimental.im.FelzenszwalbParams
-    experimental.im.WekaParams
 ```

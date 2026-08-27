@@ -183,7 +183,7 @@ def fit_decomposition(
     reference: dict[str, np.ndarray] = RUIFROK_HE,
     max_angle_deg: float = 45.0,
 ) -> StainReference:
-    """Fit a decomposition :class:`StainReference` (stain matrix + max concentrations)."""
+    """Fit a decomposition :class:`~squidpy.experimental.im.StainReference` (stain matrix + max concentrations)."""
     # `params` is `total=False`, so resolve rather than assume every key is present.
     params = _resolve_macenko_params(params) if method == "macenko" else _resolve_vahadane_params(params)
     od = _tissue_od(image_rgb, white_point, params["beta"], tissue_mask=tissue_mask, image_key=image_key)

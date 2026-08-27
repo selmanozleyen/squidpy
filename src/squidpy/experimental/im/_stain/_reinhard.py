@@ -39,7 +39,7 @@ def validate_reinhard_params(params: dict[str, Any]) -> None:
 
 
 def _resolve_reinhard_params(method_params: ReinhardParams | Mapping[str, Any] | None) -> ReinhardParams:
-    """Normalise the ``method_params`` argument to a validated :class:`ReinhardParams`."""
+    """Normalise the ``method_params`` argument to a validated :class:`~squidpy.experimental.types.ReinhardParams`."""
     return resolve_params(method_params, defaults=_REINHARD_DEFAULTS, validate=validate_reinhard_params)
 
 
@@ -87,7 +87,7 @@ def _reinhard_mask(lab: xr.DataArray, params: ReinhardParams, tissue_mask: np.nd
     """Resolve the tissue mask for the Reinhard stats: external mask wins, else
     the param-driven luminosity mask (or ``None`` for vanilla Reinhard).
 
-    ``params`` is resolved here rather than assumed complete: :class:`ReinhardParams`
+    ``params`` is resolved here rather than assumed complete: :class:`~squidpy.experimental.types.ReinhardParams`
     is ``total=False``, so a caller may legitimately pass a partial mapping."""
     params = _resolve_reinhard_params(params)
     if tissue_mask is not None:

@@ -216,8 +216,8 @@ def detect_tissue(
             - `DetectTissueMethod.WEKA` or `"weka"` - Trainable segmentation with corner background priors and RGB multiscale features.
     method_params
         Optional parameters specific to the selected method. For `"felzenszwalb"`, provide a
-        :class:`FelzenszwalbParams` instance or a mapping of its fields. For `"weka"`, provide a
-        :class:`WekaParams` instance or mapping. Passing values when ``method="otsu"`` is not supported.
+        :class:`~squidpy.experimental.types.FelzenszwalbParams` instance or a mapping of its fields. For `"weka"`, provide a
+        :class:`~squidpy.experimental.types.WekaParams` instance or mapping. Passing values when ``method="otsu"`` is not supported.
     border_margin_px
         Ignore a border when seeding and predicting tissue. Can be:
 

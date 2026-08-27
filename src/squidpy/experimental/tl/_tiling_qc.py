@@ -73,7 +73,7 @@ def validate_qc_params(params: dict[str, Any]) -> None:
 
 
 def _resolve_qc_params(qc_params: TilingQCParams | Mapping[str, Any] | None) -> TilingQCParams:
-    """Normalise the ``tiling_qc_params`` argument to a validated :class:`TilingQCParams`."""
+    """Normalise the ``tiling_qc_params`` argument to a validated :class:`~squidpy.experimental.types.TilingQCParams`."""
     return resolve_params(
         qc_params, defaults=_QC_DEFAULTS, validate=validate_qc_params, arg_name="tiling_qc_params"
     )
@@ -475,9 +475,9 @@ def calculate_tiling_qc(
         of 10 leaves a little wiggle room for biological irregularity
         without wasting compute on distant cells.
     tiling_qc_params
-        Advanced tuning knobs as a :class:`TilingQCParams` instance or
+        Advanced tuning knobs as a :class:`~squidpy.experimental.types.TilingQCParams` instance or
         a ``Mapping`` of its field names to values.  See
-        :class:`TilingQCParams` for each field's meaning and default.
+        :class:`~squidpy.experimental.types.TilingQCParams` for each field's meaning and default.
         ``None`` (default) uses all defaults.
     n_jobs
         Number of threads for tile processing.  ``-1`` (default) uses

@@ -240,7 +240,7 @@ def fit_stain_reference(
         Scale level to fit on. ``"auto"`` (default) uses the coarsest level,
         which is cheap and sufficient for colour statistics.
     method_params
-        A :class:`ReinhardParams`/:class:`MacenkoParams`/:class:`VahadaneParams`
+        A :class:`~squidpy.experimental.types.ReinhardParams`/:class:`~squidpy.experimental.types.MacenkoParams`/:class:`~squidpy.experimental.types.VahadaneParams`
         instance, a mapping of its fields, or ``None`` for defaults. Must match
         ``method``.
     white_point
@@ -268,7 +268,7 @@ def fit_stain_reference(
 
     Returns
     -------
-    The fitted :class:`StainReference`. Nothing is written to ``sdata``.
+    The fitted :class:`~squidpy.experimental.im.StainReference`. Nothing is written to ``sdata``.
     """
     if method not in _VALID_METHODS:
         raise ValueError(f"Unknown method {method!r}; expected one of {list(_VALID_METHODS)}.")
@@ -314,7 +314,7 @@ def normalize_stains(
     image_key
         Key of the RGB image in ``sdata.images`` to normalize.
     reference
-        A :class:`StainReference` fitted with :func:`fit_stain_reference`.
+        A :class:`~squidpy.experimental.im.StainReference` fitted with :func:`fit_stain_reference`.
         Dispatch is on ``reference.method``.
     scale
         Scale level to normalize. ``"auto"`` (default) uses the finest level
@@ -415,7 +415,7 @@ def decompose_stains(
     sdata, image_key
         The SpatialData object and the RGB image key to decompose.
     reference_or_method
-        Either a decomposition :class:`StainReference` (its stain matrix and
+        Either a decomposition :class:`~squidpy.experimental.im.StainReference` (its stain matrix and
         white point are used) or a method name (``"macenko"``/``"vahadane"``)
         to fit on this image first. The reference is the provenance record of
         how the maps were produced (method, stain matrix, white point).
