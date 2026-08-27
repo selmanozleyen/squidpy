@@ -225,6 +225,9 @@ def apply_decomposition(
     materialised to fit a matrix.
     """
     _check_channel_dim(image_rgb)
+    # a `StainReference` is a plain mapping, so re-check it here rather than trust the
+    # caller: three tiny arrays, once per call.
+    reference = validate_stain_reference(reference)
     bg = reference["white_point"]
     # `params` is `total=False`, so resolve rather than assume every key is present.
     params = _resolve_macenko_params(params) if reference["method"] == "macenko" else _resolve_vahadane_params(params)

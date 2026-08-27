@@ -134,6 +134,9 @@ def apply_reinhard(
     Lazy if and only if ``image_rgb`` is lazy.
     """
     _check_channel_dim(image_rgb)
+    # a `StainReference` is a plain mapping, so re-check it here rather than trust the
+    # caller: three tiny arrays, once per call.
+    reference = validate_stain_reference(reference)
     fit_lab = rgb_to_lab_ruderman(fit_rgb if fit_rgb is not None else image_rgb)
     mu_src, sigma_src = _masked_channel_stats(fit_lab, _reinhard_mask(fit_lab, params, tissue_mask))
     sigma_src = np.maximum(sigma_src, _SIGMA_FLOOR)
