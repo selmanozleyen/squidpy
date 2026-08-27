@@ -36,6 +36,7 @@ from skimage.measure import label as cc_label
 from skimage.morphology import disk as morph_disk
 from spatialdata._logging import logger as logg
 
+from squidpy._validators import assert_in_range, assert_non_negative
 from squidpy.experimental.types import _STITCH_DEFAULTS, StitchParams
 from squidpy.experimental.utils._labels import iter_chunked_regionprops, resolve_labels_array
 from squidpy.experimental.utils._params import resolve_params
@@ -59,15 +60,11 @@ def validate_stitch_params(params: dict[str, Any]) -> None:
     for key in ("distance_tol", "min_edge_length", "min_edge_length_ratio", "min_edge_coverage", "candidate_min_iou"):
         params[key] = float(params[key])
     params["close_radius"] = int(params["close_radius"])
-    if params["distance_tol"] < 0:
-        raise ValueError(f"distance_tol must be >= 0, got {params['distance_tol']}.")
-    if params["min_edge_length"] < 0:
-        raise ValueError(f"min_edge_length must be >= 0, got {params['min_edge_length']}.")
+    assert_non_negative(params["distance_tol"], name="distance_tol")
+    assert_non_negative(params["min_edge_length"], name="min_edge_length")
     for key in ("min_edge_length_ratio", "min_edge_coverage", "candidate_min_iou"):
-        if not 0.0 <= params[key] <= 1.0:
-            raise ValueError(f"{key} must be in [0, 1], got {params[key]}.")
-    if params["close_radius"] < 0:
-        raise ValueError(f"close_radius must be >= 0, got {params['close_radius']}.")
+        assert_in_range(params[key], 0.0, 1.0, name=key)
+    assert_non_negative(params["close_radius"], name="close_radius")
 
 
 def _resolve_stitch_params(stitch_params: StitchParams | Mapping[str, Any] | None) -> StitchParams:

@@ -262,8 +262,8 @@ class TestTilingQCParamsResolution:
         ("kwargs", "match"),
         [
             ({"bogus": 1}, "Unknown `tiling_qc_params`"),
-            ({"distance_tol": -1.0}, "`distance_tol` must be >= 0"),
-            ({"min_area": 0}, "`min_area` must be >= 1"),
+            ({"distance_tol": -1.0}, "`distance_tol` to be non-negative"),
+            ({"min_area": 0}, "`min_area` to be positive"),
             ({"max_contour_points": 2}, "`max_contour_points` must be >= 3"),
         ],
         ids=["unknown_field", "negative_distance_tol", "zero_min_area", "tiny_max_contour_points"],

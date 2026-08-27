@@ -14,6 +14,7 @@ import numpy as np
 import xarray as xr
 
 from squidpy._utils import legacy_random
+from squidpy._validators import assert_non_negative, assert_positive
 from squidpy.experimental.im._stain._constants import RUIFROK_HE
 from squidpy.experimental.im._stain._conversion import (
     _apply_along_channel,
@@ -47,10 +48,9 @@ def validate_macenko_params(params: dict[str, Any]) -> None:
     """Coerce ``params`` in place and range-check it. Raises on invalid values."""
     params["alpha"] = float(params["alpha"])
     params["beta"] = float(params["beta"])
-    if not 0.0 < params["alpha"] < 50.0:
+    if not 0.0 < params["alpha"] < 50.0:  # open interval, so `assert_in_range` does not fit
         raise ValueError(f"`alpha` must be in (0, 50), got {params['alpha']}.")
-    if params["beta"] < 0.0:
-        raise ValueError(f"`beta` must be >= 0, got {params['beta']}.")
+    assert_non_negative(params["beta"], name="beta")
 
 
 def validate_vahadane_params(params: dict[str, Any]) -> None:
@@ -58,12 +58,9 @@ def validate_vahadane_params(params: dict[str, Any]) -> None:
     params["beta"] = float(params["beta"])
     params["lambda1"] = float(params["lambda1"])
     params["n_iter"] = int(params["n_iter"])
-    if params["beta"] < 0.0:
-        raise ValueError(f"`beta` must be >= 0, got {params['beta']}.")
-    if params["lambda1"] < 0.0:
-        raise ValueError(f"`lambda1` must be >= 0, got {params['lambda1']}.")
-    if params["n_iter"] < 1:
-        raise ValueError(f"`n_iter` must be >= 1, got {params['n_iter']}.")
+    assert_non_negative(params["beta"], name="beta")
+    assert_non_negative(params["lambda1"], name="lambda1")
+    assert_positive(params["n_iter"], name="n_iter")
 
 
 def _resolve_macenko_params(params: MacenkoParams | Mapping[str, Any] | None) -> MacenkoParams:

@@ -24,10 +24,14 @@ from squidpy.experimental.utils._params import Default, defaults_of
 #: Pixels whose Ruderman Lab-L luminosity (normalised to ``[0, 1]``) exceeds this are
 #: treated as near-white background and excluded when fitting stain statistics.
 #: Semantics follow HistomicsTK's ``reinhard``, so luminosity thresholds from the H&E
-#: literature transfer directly. Declared here rather than with the other stain
-#: constants because this module must not import from the implementation packages --
-#: their package ``__init__`` imports this one. `_stain._constants` re-exports it.
+#: literature transfer directly. Declared here, with the key it defaults, and
+#: re-exported by ``squidpy.experimental.im._stain._constants``: this module must not
+#: import from the implementation packages, whose ``__init__`` imports this one.
 DEFAULT_LUMINOSITY_THRESHOLD: float = 0.8
+
+#: Mean-absorbance (optical-density) cutoff selecting tissue pixels. One value for both
+#: decomposition methods -- it is the same quantity, so it is declared once.
+_OD_BETA: float = 0.15
 
 __all__ = [
     "BackgroundDetectionParams",
@@ -159,7 +163,7 @@ class MacenkoParams(TypedDict, total=False):
     alpha: Annotated[float, Default(1.0)]
     """Angular percentile (deg) for the two stain directions; the extremes are taken at ``alpha`` / ``100 - alpha``."""
 
-    beta: Annotated[float, Default(0.15)]
+    beta: Annotated[float, Default(_OD_BETA)]
     """Mean-absorbance cutoff selecting tissue pixels (optical-density space)."""
 
 
@@ -169,7 +173,7 @@ _MACENKO_DEFAULTS: MacenkoParams = defaults_of(MacenkoParams)
 class VahadaneParams(TypedDict, total=False):
     """Tuning knobs for Vahadane (sparse-NMF) stain-matrix fitting."""
 
-    beta: Annotated[float, Default(0.15)]
+    beta: Annotated[float, Default(_OD_BETA)]
     """Mean-absorbance cutoff selecting tissue pixels (optical-density space)."""
 
     lambda1: Annotated[float, Default(0.1)]

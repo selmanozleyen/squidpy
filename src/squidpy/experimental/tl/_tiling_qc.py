@@ -41,6 +41,7 @@ from sklearn.neighbors import BallTree
 from spatialdata._logging import logger as logg
 from spatialdata.models import TableModel
 
+from squidpy._validators import assert_non_negative, assert_positive
 from squidpy.experimental.im._tiling import (
     _run_tiled,
     build_tile_specs,
@@ -62,11 +63,9 @@ def validate_qc_params(params: dict[str, Any]) -> None:
     params["distance_tol"] = float(params["distance_tol"])
     params["min_area"] = int(params["min_area"])
     params["max_contour_points"] = int(params["max_contour_points"])
-    if params["distance_tol"] < 0:
-        raise ValueError(f"`distance_tol` must be >= 0, got {params['distance_tol']}.")
-    if params["min_area"] < 1:
-        raise ValueError(f"`min_area` must be >= 1, got {params['min_area']}.")
-    if params["max_contour_points"] < 3:
+    assert_non_negative(params["distance_tol"], name="distance_tol")
+    assert_positive(params["min_area"], name="min_area")
+    if params["max_contour_points"] < 3:  # the floor is 3, not 1, so no helper fits
         raise ValueError(
             f"`max_contour_points` must be >= 3 (collinearity needs 3 points), got {params['max_contour_points']}."
         )
