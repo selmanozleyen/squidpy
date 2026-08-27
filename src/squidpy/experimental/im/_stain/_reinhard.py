@@ -23,7 +23,7 @@ from squidpy.experimental.im._stain._conversion import (
 )
 from squidpy.experimental.im._stain._mask import as_spatial_mask, foreground_mask_from_lab
 from squidpy.experimental.im._stain._reference import StainReference
-from squidpy.experimental.utils._params import resolve_typed_params
+from squidpy.experimental.utils._params import resolve_params
 
 # Numerical safeguard against divide-by-zero on flat (constant-colour)
 # channels. Not a tuning knob, so kept off the public ReinhardParams surface.
@@ -64,7 +64,7 @@ def validate_reinhard_params(params: dict[str, Any]) -> None:
 
 def _resolve_reinhard_params(method_params: ReinhardParams | Mapping[str, Any] | None) -> ReinhardParams:
     """Normalise the ``method_params`` argument to a validated :class:`ReinhardParams`."""
-    return resolve_typed_params(method_params, defaults=_REINHARD_DEFAULTS, validate=validate_reinhard_params)
+    return resolve_params(method_params, defaults=_REINHARD_DEFAULTS, validate=validate_reinhard_params)
 
 
 def _masked_channel_stats(lab: xr.DataArray, mask: xr.DataArray | None) -> tuple[np.ndarray, np.ndarray]:

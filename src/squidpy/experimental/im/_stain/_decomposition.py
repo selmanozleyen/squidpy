@@ -31,7 +31,7 @@ from squidpy.experimental.im._stain._validation import (
     reorder_to_canonical,
     validate_stain_matrix,
 )
-from squidpy.experimental.utils._params import resolve_typed_params
+from squidpy.experimental.utils._params import resolve_params
 
 _MAXC_PERCENTILE = 99.0
 _MAXC_FLOOR = 1e-6
@@ -94,11 +94,11 @@ def validate_vahadane_params(params: dict[str, Any]) -> None:
 
 
 def _resolve_macenko_params(params: MacenkoParams | Mapping[str, Any] | None) -> MacenkoParams:
-    return resolve_typed_params(params, defaults=_MACENKO_DEFAULTS, validate=validate_macenko_params)
+    return resolve_params(params, defaults=_MACENKO_DEFAULTS, validate=validate_macenko_params)
 
 
 def _resolve_vahadane_params(params: VahadaneParams | Mapping[str, Any] | None) -> VahadaneParams:
-    return resolve_typed_params(params, defaults=_VAHADANE_DEFAULTS, validate=validate_vahadane_params)
+    return resolve_params(params, defaults=_VAHADANE_DEFAULTS, validate=validate_vahadane_params)
 
 
 def _tissue_od(

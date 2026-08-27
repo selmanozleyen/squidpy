@@ -29,7 +29,7 @@ from squidpy._utils import (
     _yx_from_shape,
     legacy_random,
 )
-from squidpy.experimental.utils._params import resolve_typed_params
+from squidpy.experimental.utils._params import resolve_params
 
 from ._utils import flatten_channels, get_element_data
 
@@ -381,12 +381,12 @@ def detect_tissue(
             raise ValueError("`method_params` are not supported for OTSU tissue detection.")
         resolved_method_params = None
     elif (method_defaults := _METHOD_DEFAULTS.get(method)) is not None:
-        resolved_method_params = resolve_typed_params(method_params, defaults=method_defaults)
+        resolved_method_params = resolve_params(method_params, defaults=method_defaults)
     else:
         raise ValueError(f"Unsupported method: {method}")
 
     # Background params
-    bgp = resolve_typed_params(
+    bgp = resolve_params(
         background_detection_params
         or BackgroundDetectionParams(
             ymin_xmin_is_bg=corners_are_background,
