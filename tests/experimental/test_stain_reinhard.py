@@ -123,6 +123,13 @@ class TestResolveReinhardParams:
         assert p["luminosity_threshold"] == 0.6
         assert p["mask_background"] is False
 
+    def test_mirrored_constant_agrees(self) -> None:
+        # `types` cannot import from the implementation packages, so it holds its own
+        # copy of this default; the two must not drift.
+        from squidpy.experimental.types import DEFAULT_LUMINOSITY_THRESHOLD as mirrored
+
+        assert mirrored == DEFAULT_LUMINOSITY_THRESHOLD
+
     def test_defaults_not_mutated(self) -> None:
         # `resolve_params` coerces in place, so it must work on a copy
         _resolve_reinhard_params({"luminosity_threshold": 0.6})

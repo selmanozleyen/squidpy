@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import spatialdata as sd
@@ -36,6 +36,7 @@ from skimage.measure import label as cc_label
 from skimage.morphology import disk as morph_disk
 from spatialdata._logging import logger as logg
 
+from squidpy.experimental.types import _STITCH_DEFAULTS, StitchParams
 from squidpy.experimental.utils._labels import iter_chunked_regionprops, resolve_labels_array
 from squidpy.experimental.utils._params import resolve_params
 
@@ -51,48 +52,6 @@ _SCORE_FEATURES: tuple[str, ...] = ("iou", "endpoint_match", "merge_compactness"
 # The subset computed by the expensive merge-union step; the rest are cheap
 # geometry features known before it, which drives the scoring early-prune.
 _SHAPE_FEATURES: tuple[str, ...] = ("merge_compactness", "merge_solidity")
-
-
-class StitchParams(TypedDict, total=False):
-    """Advanced tuning knobs for :func:`~squidpy.experimental.tl.assign_stitch_groups`.
-
-    Defaults work for typical 2D segmentation tiles produced by cellpose-like
-    pipelines. Pass a mapping of these keys as ``stitch_params``; every key is
-    optional and falls back to ``_STITCH_DEFAULTS``. Values are coerced and
-    range-checked by ``validate_stitch_params`` when resolved. These are
-    advanced knobs -- the defaults rarely need changing.
-    """
-
-    distance_tol: float
-    """Sub-pixel tolerance for "lies on a bbox edge"."""
-
-    min_edge_length: float
-    """Absolute floor on cut-edge length (pixels)."""
-
-    min_edge_length_ratio: float
-    """Minimum cut-edge length relative to the cell's equivalent diameter."""
-
-    min_edge_coverage: float
-    """Minimum fraction of parallel-axis positions covered by near-edge contour points."""
-
-    candidate_min_iou: float
-    """Loose 1-D IoU floor at candidate enumeration."""
-
-    close_radius: int
-    """Morphological closing disk radius for the union mask. Also the length scale for
-    ``gap_proximity`` (normalised by ``2 * close_radius``)."""
-
-
-
-#: Annotated with the TypedDict so the type checker verifies every default.
-_STITCH_DEFAULTS: StitchParams = {
-    "distance_tol": 0.75,
-    "min_edge_length": 5.0,
-    "min_edge_length_ratio": 0.4,
-    "min_edge_coverage": 0.5,
-    "candidate_min_iou": 0.2,
-    "close_radius": 3,
-}
 
 
 def validate_stitch_params(params: dict[str, Any]) -> None:

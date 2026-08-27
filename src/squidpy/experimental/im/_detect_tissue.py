@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import enum
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, cast
 
 import dask.array as da
 import numpy as np
@@ -22,12 +22,18 @@ from spatialdata.models import Labels2DModel
 from spatialdata.transformations import get_transformation
 
 from squidpy._utils import (
-    RNGLike,
-    SeedLike,
     _ensure_dim_order,
     _get_scale_factors,
     _yx_from_shape,
     legacy_random,
+)
+from squidpy.experimental.types import (
+    _BACKGROUND_DEFAULTS,
+    _FELZENSZWALB_DEFAULTS,
+    _WEKA_DEFAULTS,
+    BackgroundDetectionParams,
+    FelzenszwalbParams,
+    WekaParams,
 )
 from squidpy.experimental.utils._params import resolve_params
 
@@ -40,30 +46,6 @@ class DetectTissueMethod(enum.Enum):
     WEKA = enum.auto()
 
 
-class BackgroundDetectionParams(TypedDict, total=False):
-    """Which corners are background, and how large the corner boxes should be.
-
-    If no corners are flagged ``True``, orientation falls back to bright
-    background -- see ``any_corner``.
-    """
-
-    ymin_xmin_is_bg: bool
-    """Whether the ``(ymin, xmin)`` corner is background."""
-
-    ymax_xmin_is_bg: bool
-    """Whether the ``(ymax, xmin)`` corner is background."""
-
-    ymin_xmax_is_bg: bool
-    """Whether the ``(ymin, xmax)`` corner is background."""
-
-    ymax_xmax_is_bg: bool
-    """Whether the ``(ymax, xmax)`` corner is background."""
-
-    corner_size_pct: float
-    """Corner box size as a fraction of height/width."""
-
-
-
 def any_corner(params: BackgroundDetectionParams) -> bool:
     """Whether any corner is flagged as background."""
     return any(
@@ -74,106 +56,6 @@ def any_corner(params: BackgroundDetectionParams) -> bool:
             params["ymax_xmax_is_bg"],
         )
     )
-
-
-class FelzenszwalbParams(TypedDict, total=False):
-    """Size-aware superpixel defaults for felzenszwalb segmentation.
-    """
-
-    grid_rows: int
-    """Target superpixel grid rows."""
-
-    grid_cols: int
-    """Target superpixel grid columns."""
-
-    sigma_frac: float
-    """Blur = this * short side, clipped to ``[1, 5]`` px."""
-
-    scale_coef: float
-    """``scale`` = coef * target_area."""
-
-    min_size_coef: float
-    """``min_size`` = coef * target_area."""
-
-
-
-class WekaParams(TypedDict, total=False):
-    """Parameters for WEKA-like trainable segmentation.
-    """
-
-    sigma_min: float
-    """Smallest scale in the multiscale feature bank."""
-
-    sigma_max: float
-    """Largest scale in the multiscale feature bank."""
-
-    edges: bool
-    """Include edge features."""
-
-    pseudo_tissue_percentile: float
-    """Percentile of distance-from-bg to label as tissue."""
-
-    pseudo_min_pixels: int
-    """Minimum number of tissue pixels to seed."""
-
-    rf_estimators: int
-    """Number of trees in the random forest."""
-
-    rf_max_depth: int | None
-    """Maximum tree depth; ``None`` for unlimited."""
-
-    rf_max_samples: float
-    """Fraction of samples drawn to train each tree."""
-
-    rng: SeedLike | RNGLike | None
-    """Source of randomness; ``None`` draws from OS entropy."""
-
-    refine_with_classifier: bool
-    """Run the second-stage background refinement."""
-
-    refine_n_samples_per_class: int
-    """Training samples drawn per class in the refinement step."""
-
-    refine_bg_prob_threshold: float
-    """Only drop pixels whose background probability exceeds this."""
-
-    border_margin_px: int | Sequence[int]
-    """Border ignored when seeding and predicting."""
-
-
-
-#: Annotated with the TypedDicts so the type checker verifies every default.
-_BACKGROUND_DEFAULTS: BackgroundDetectionParams = {
-    "ymin_xmin_is_bg": True,
-    "ymax_xmin_is_bg": True,
-    "ymin_xmax_is_bg": True,
-    "ymax_xmax_is_bg": True,
-    "corner_size_pct": 0.01,
-}
-
-_FELZENSZWALB_DEFAULTS: FelzenszwalbParams = {
-    "grid_rows": 100,
-    "grid_cols": 100,
-    "sigma_frac": 0.008,
-    "scale_coef": 0.25,
-    "min_size_coef": 0.20,
-}
-
-_WEKA_DEFAULTS: WekaParams = {
-    "sigma_min": 1.0,
-    "sigma_max": 16.0,
-    "edges": True,
-    "pseudo_tissue_percentile": 90.0,
-    "pseudo_min_pixels": 50,
-    "rf_estimators": 100,
-    "rf_max_depth": 10,
-    "rf_max_samples": 0.05,
-    "rng": None,
-    "refine_with_classifier": True,
-    "refine_n_samples_per_class": 50_000,
-    "refine_bg_prob_threshold": 0.6,
-    "border_margin_px": 0,
-}
 
 
 #: The params dataclass each method takes. OTSU is absent: it accepts none.

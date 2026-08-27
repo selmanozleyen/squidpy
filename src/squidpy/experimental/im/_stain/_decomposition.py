@@ -8,12 +8,12 @@ transform is a single per-pixel matmul and stays lazy.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypedDict
+from typing import Any
 
 import numpy as np
 import xarray as xr
 
-from squidpy._utils import RNGLike, SeedLike, legacy_random
+from squidpy._utils import legacy_random
 from squidpy.experimental.im._stain._constants import RUIFROK_HE
 from squidpy.experimental.im._stain._conversion import (
     _apply_along_channel,
@@ -31,45 +31,16 @@ from squidpy.experimental.im._stain._validation import (
     reorder_to_canonical,
     validate_stain_matrix,
 )
+from squidpy.experimental.types import (
+    _MACENKO_DEFAULTS,
+    _VAHADANE_DEFAULTS,
+    MacenkoParams,
+    VahadaneParams,
+)
 from squidpy.experimental.utils._params import resolve_params
 
 _MAXC_PERCENTILE = 99.0
 _MAXC_FLOOR = 1e-6
-
-
-class MacenkoParams(TypedDict, total=False):
-    """Tuning knobs for Macenko stain-matrix fitting.
-    """
-
-    alpha: float
-    """Angular percentile (deg) for the two stain directions; the extremes are taken at ``alpha`` / ``100 - alpha``."""
-
-    beta: float
-    """Mean-absorbance cutoff selecting tissue pixels (optical-density space)."""
-
-
-
-class VahadaneParams(TypedDict, total=False):
-    """Tuning knobs for Vahadane (sparse-NMF) stain-matrix fitting.
-    """
-
-    beta: float
-    """Mean-absorbance cutoff selecting tissue pixels (optical-density space)."""
-
-    lambda1: float
-    """L1 sparsity regularisation on the concentration factor of the NMF."""
-
-    n_iter: int
-    """Maximum NMF iterations."""
-
-    rng: SeedLike | RNGLike | None
-    """Source of randomness for NMF initialisation tie-breaking; ``None`` draws from OS entropy."""
-
-
-
-#: Annotated with the TypedDicts so the type checker verifies every default.
-_MACENKO_DEFAULTS: MacenkoParams = {"alpha": 1.0, "beta": 0.15}
-_VAHADANE_DEFAULTS: VahadaneParams = {"beta": 0.15, "lambda1": 0.1, "n_iter": 200, "rng": None}
 
 
 def validate_macenko_params(params: dict[str, Any]) -> None:

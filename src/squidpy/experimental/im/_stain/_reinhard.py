@@ -8,12 +8,11 @@ thin ``sdata`` wrapper lives in :mod:`._normalize`.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypedDict
+from typing import Any
 
 import numpy as np
 import xarray as xr
 
-from squidpy.experimental.im._stain._constants import DEFAULT_LUMINOSITY_THRESHOLD
 from squidpy.experimental.im._stain._conversion import (
     _apply_along_channel,
     _check_channel_dim,
@@ -23,33 +22,12 @@ from squidpy.experimental.im._stain._conversion import (
 )
 from squidpy.experimental.im._stain._mask import as_spatial_mask, foreground_mask_from_lab
 from squidpy.experimental.im._stain._reference import StainReference
+from squidpy.experimental.types import _REINHARD_DEFAULTS, ReinhardParams
 from squidpy.experimental.utils._params import resolve_params
 
 # Numerical safeguard against divide-by-zero on flat (constant-colour)
 # channels. Not a tuning knob, so kept off the public ReinhardParams surface.
 _SIGMA_FLOOR: float = 1e-6
-
-
-class ReinhardParams(TypedDict, total=False):
-    """Tuning knobs for Reinhard stain normalization.
-
-    Pass a mapping of these keys as ``method_params``; every key is optional
-    and falls back to ``_REINHARD_DEFAULTS``. Values are coerced and
-    range-checked by ``validate_reinhard_params`` when resolved.
-    """
-
-    luminosity_threshold: float
-    """Normalised Ruderman Lab-L cutoff in ``(0, 1]``; pixels brighter than this are excluded from the fit."""
-
-    mask_background: bool
-    """If ``True``, fit channel statistics over tissue pixels only; if ``False``, use every pixel (vanilla Reinhard)."""
-
-
-#: Annotated with the TypedDict so the type checker verifies every default.
-_REINHARD_DEFAULTS: ReinhardParams = {
-    "luminosity_threshold": DEFAULT_LUMINOSITY_THRESHOLD,
-    "mask_background": True,
-}
 
 
 def validate_reinhard_params(params: dict[str, Any]) -> None:
