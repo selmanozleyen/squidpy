@@ -15,7 +15,6 @@ from numba import njit, prange
 from numba.typed import List
 from numba_progress import ProgressBar
 from numpy.typing import NDArray
-from pandas import CategoricalDtype
 from scanpy import logging as logg
 from scipy.sparse import csr_matrix, issparse
 from spatialdata import SpatialData
@@ -40,6 +39,7 @@ from squidpy._validators import assert_positive
 from squidpy.gr._utils import (
     _assert_categorical_obs,
     _assert_connectivity_key,
+    _group_offsets,
     _save_data,
     extract_adata_if_sdata,
 )
@@ -453,10 +453,12 @@ def nhood_enrichment(
 
     generators = List(np.random.default_rng(rng).spawn(n_perms))
 
-    # Group structure for within-group shuffling, as a CSR-like (offsets, indices) pair in category
-    # order with ascending indices per group. Without a `library_key` there is a single group
-    # spanning all cells, which reproduces a plain global shuffle.
-    group_offsets, group_indices = _build_shuffle_groups(libraries, len(int_clust))
+    # groups to shuffle within; without a `library_key` one group spans all cells, i.e. a global shuffle
+    if libraries is None:
+        group_offsets = np.array([0, len(int_clust)], dtype=np.int64)
+        group_indices = np.arange(len(int_clust), dtype=np.int64)
+    else:
+        group_offsets, group_indices = _group_offsets(libraries)
 
     # A single numba ``prange`` kernel shuffles + counts + normalizes per thread with the GIL
     # released, and ticks the progress bar from inside the loop; numba owns the parallelism.
@@ -802,23 +804,3 @@ def _centrality_scores_helper(
         queue.put(Signal.FINISH)
 
     return pd.DataFrame(res_list, columns=[method], index=cat)
-
-
-def _build_shuffle_groups(
-    libraries: pd.Series[CategoricalDtype] | None,
-    n_cells: int,
-) -> tuple[NDArrayA, NDArrayA]:
-    """Build a CSR-like ``(offsets, indices)`` description of the within-group shuffling.
-
-    ``indices[offsets[g]:offsets[g + 1]]`` are the cell indices of group ``g`` in ascending order,
-    with groups in category order. Without a ``library_key`` there is a single group spanning all
-    cells, which reproduces a global shuffle.
-    """
-    if libraries is None:
-        return np.array([0, n_cells], dtype=np.int64), np.arange(n_cells, dtype=np.int64)
-
-    codes = libraries.cat.codes.to_numpy()
-    n_groups = len(libraries.cat.categories)
-    group_indices = np.argsort(codes, kind="stable").astype(np.int64)
-    group_offsets = np.concatenate(([0], np.cumsum(np.bincount(codes, minlength=n_groups)))).astype(np.int64)
-    return group_offsets, group_indices
