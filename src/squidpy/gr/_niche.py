@@ -746,6 +746,13 @@ def calculate_niche_spatialleiden(
 
     adata = orig_adata.copy() if copy else orig_adata
 
+    if mask is not None:
+        raise ValueError(
+            "'mask' keeps masked observations out of the niche fit, which SpatialLeiden cannot do: "
+            "it clusters the graphs themselves, so an observation either takes part or loses its "
+            "edges. Subset before 'spatial_neighbors' if the masked cells should not be neighbors."
+        )
+
     # normalise once here; everything below this point works with rngs only
     rng = np.random.default_rng(rng)
     resolution_list = _resolution_values(resolutions, pairs_ok=True)
@@ -1405,12 +1412,6 @@ def _spatialleiden_once(
         )
 
     result_columns = [f"spatialleiden_res={res}" for res in resolution_list]
-    keep = _fitted_on(adata, mask)
-    if keep is not None:
-        for col in result_columns:
-            labels = adata.obs[col].astype(str)
-            labels[~keep] = "not_a_niche"
-            adata.obs[col] = labels
     _postprocess_niche_results(adata, result_columns, min_niche_size, prefix)
     return result_columns
 

@@ -18,6 +18,7 @@ from squidpy.gr import (
     calculate_niche,
     calculate_niche_cellcharter,
     calculate_niche_neighborhood,
+    calculate_niche_spatialleiden,
     calculate_niche_utag,
     spatial_neighbors_knn,
 )
@@ -765,3 +766,13 @@ def test_mask_rejects_what_it_cannot_mean(index, match):
     )
     with pytest.raises(ValueError, match=match):
         calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=0, mask=mask)
+
+
+def test_spatialleiden_refuses_a_mask():
+    "It clusters the graphs, so an observation cannot be kept as a neighbor but dropped from the fit."
+    adata = _tiny(n=50)
+    sc.pp.pca(adata, n_comps=4)
+    sc.pp.neighbors(adata, n_neighbors=6, random_state=0)
+    keep = Series(np.arange(50) < 30, index=adata.obs_names)
+    with pytest.raises(ValueError, match=r"SpatialLeiden cannot do"):
+        calculate_niche_spatialleiden(adata, resolutions=0.5, rng=0, mask=keep)
