@@ -627,6 +627,9 @@ def calculate_niche_cellcharter(
         Number of Gaussian mixture components used to assign niches.
         Therefore, this parameter directly determines the number of niche
         labels produced per library or dataset.
+    n_jobs
+        Threads for the hop search behind the spatial embedding. Also caps its scratch,
+        which is two buffers per thread.
     use_rep
         Key in ``adata.obsm`` containing a precomputed observation-level
         representation to cluster. When provided, this representation is used
@@ -763,6 +766,9 @@ def calculate_niche_spatialleiden(
         library_ids = adata.obs[library_key].unique()
         library_rngs = rng.spawn(len(library_ids))
 
+        # bound even when every library is empty and the loop body never runs
+        added_columns: list[str] = []
+
         # go through each library_id and process the corresponding adata subset
         for itr, lib_id in enumerate(library_ids):
             logg.info(f"Processing library '{lib_id}'")
@@ -887,6 +893,9 @@ def _calculate_niche_custom(
 
     adata = orig_adata.copy() if copy else orig_adata
 
+    if not isinstance(embedding_key_added, str) or not embedding_key_added:
+        raise ValueError(f"'embedding_key_added' must be a non-empty string, got {embedding_key_added!r}")
+
     embedding = embedder(adata)
     adata.obsm[embedding_key_added] = embedding
 
@@ -895,6 +904,9 @@ def _calculate_niche_custom(
     if library_key is not None:
         assert_key_in_adata(adata, library_key, attr="obs")
         logg.info(f"Stratifying by library_key '{library_key}'")
+
+        # bound even when every library is empty and the loop body never runs
+        added_columns: list[str] = []
 
         # go through each library_id and process the corresponding adata subset
         for itr, lib_id in enumerate(adata.obs[library_key].unique()):
@@ -1254,7 +1266,8 @@ def _nhop_pca_embedding(
             "ignores: the hop rings are boolean, as in CellCharter. Use the 'neighborhood' flavor "
             "if the weights should count.",
             UserWarning,
-            stacklevel=3,
+            # the embedder is reached through `functools.partial`, so 3 lands in this module
+            stacklevel=4,
         )
 
     # hops are contiguous from 0, so hop 0 is just the first element and no lookup is needed

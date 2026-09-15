@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal, Protocol, Self, runtime_checkable
+from typing import Any, Literal, Protocol, Self
 
 import anndata as ad
 import pandas as pd
@@ -8,10 +8,7 @@ import scanpy as sc
 from fast_array_utils.types import HasArrayNamespace as Array
 from sklearn.base import BaseEstimator, ClusterMixin
 
-__all__ = ["Clusterer", "LeidenClusterer"]
 
-
-@runtime_checkable
 class Clusterer(Protocol):
     """Assigns one cluster label per observation, and can be re-fitted with a new seed.
 
