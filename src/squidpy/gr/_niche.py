@@ -903,9 +903,6 @@ def _calculate_niche_custom(
     if not isinstance(embedding_key_added, str) or not embedding_key_added:
         raise ValueError(f"'embedding_key_added' must be a non-empty string, got {embedding_key_added!r}")
 
-    embedding = embedder(adata)
-    adata.obsm[embedding_key_added] = embedding
-
     rng = np.random.default_rng(rng)
 
     if library_key is not None:
@@ -929,7 +926,8 @@ def _calculate_niche_custom(
 
             lib_adata = adata[lib_indices].copy()
 
-            lib_embedding = lib_adata.obsm[embedding_key_added]
+            lib_embedding = embedder(lib_adata)
+            lib_adata.obsm[embedding_key_added] = lib_embedding
             result_columns = _fit_clusterers(lib_adata, lib_embedding, clusterers, rng)
             _postprocess_niche_results(lib_adata, result_columns, mask, min_niche_size, prefix=f"lib={lib_id}_")
 
@@ -944,6 +942,8 @@ def _calculate_niche_custom(
             adata.obs[col] = adata.obs[col].astype("category")
 
     else:
+        embedding = embedder(adata)
+        adata.obsm[embedding_key_added] = embedding
         result_columns = _fit_clusterers(adata, embedding, clusterers, rng)
         _postprocess_niche_results(adata, result_columns, mask, min_niche_size)
 

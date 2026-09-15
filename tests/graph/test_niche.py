@@ -12,9 +12,11 @@ from spatialdata import SpatialData
 from spatialdata.models import TableModel
 
 from squidpy.gr import (
+    _niche,
     calculate_niche,
     calculate_niche_cellcharter,
     calculate_niche_neighborhood,
+    calculate_niche_utag,
     spatial_neighbors_knn,
 )
 from squidpy.gr._nhood import nhood_aggregate
@@ -461,3 +463,42 @@ def test_clusterer_without_a_random_state_is_rejected():
     adata = _tiny()
     with pytest.raises(TypeError, match=r"no 'random_state'"):
         _fit_clusterers(adata, np.asarray(to_dense(adata.X)), {"c": DBSCAN(eps=3.0)}, np.random.default_rng(0))
+
+
+def test_library_key_embeds_each_library_on_its_own(monkeypatch):
+    "Stratifying exists to fit the embedding per library, not once on the pooled object."
+    rng = np.random.default_rng(0)
+    half = 60
+    adata = AnnData(X=csr_matrix(rng.random((2 * half, 12)).astype(np.float32)))
+    adata.obsm["spatial"] = np.vstack([rng.random((half, 2)) * 10, rng.random((half, 2)) * 10 + 100])
+    adata.obs["ct"] = pd.Categorical(["a"] * 50 + ["b"] * 10 + ["a"] * 10 + ["b"] * 50)
+    adata.obs["section"] = pd.Categorical(["s1"] * half + ["s2"] * half)
+    spatial_neighbors_knn(adata, n_neighs=6, library_key="section")
+
+    seen: list[int] = []
+    original = _niche._nhood_profile_embedding
+
+    def spy(adata_arg, **kwargs):
+        seen.append(adata_arg.n_obs)
+        return original(adata_arg, **kwargs)
+
+    monkeypatch.setattr(_niche, "_nhood_profile_embedding", spy)
+    calculate_niche_neighborhood(
+        adata, groups="ct", resolutions=1.0, n_neighbors=10, rng=0, library_key="section", scale=True
+    )
+    # one fit per library, on that library's own observations; a pooled fit is a single 2 * half
+    assert seen == [half, half], f"embedder was handed {seen} observations"
+
+
+def test_library_key_writes_no_pooled_embedding():
+    "Fitted per library, the blocks are in different spaces, so there is no one array to store."
+    rng = np.random.default_rng(1)
+    adata = AnnData(X=csr_matrix(rng.random((70, 20)).astype(np.float32)))
+    adata.obsm["spatial"] = np.vstack([rng.random((15, 2)) * 10, rng.random((55, 2)) * 10 + 100])
+    adata.obs["ct"] = pd.Categorical([f"t{k}" for k in rng.integers(0, 3, 70)])
+    adata.obs["section"] = pd.Categorical(["s1"] * 15 + ["s2"] * 55)
+    spatial_neighbors_knn(adata, n_neighs=4, library_key="section")
+
+    calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=0, library_key="section")
+    assert "niche_embedding" not in adata.obsm
+    assert "utag_niche_res=1.0" in adata.obs, "the labels must still be written"
