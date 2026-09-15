@@ -12,6 +12,7 @@ import scanpy as sc
 from anndata import AnnData
 from fast_array_utils.conv import to_dense
 from fast_array_utils.types import HasArrayNamespace as Array
+from numpy.typing import NDArray
 from scipy.sparse import hstack as sparse_hstack
 from scipy.sparse import issparse
 from sklearn.base import clone
@@ -265,7 +266,7 @@ def calculate_niche(
             aggregation=aggregation,
             rng=rng,
             spatial_connectivities_key=spatial_connectivities_key,
-            n_components=n_components,
+            n_clusters=n_components,
             use_rep=use_rep,
             embedding_key_added="niche_embedding",
             min_niche_size=min_niche_size,
@@ -562,7 +563,8 @@ def calculate_niche_cellcharter(
     aggregation: str = "mean",
     rng: SeedLike | RNGLike | None = None,
     spatial_connectivities_key: str = "spatial_connectivities",
-    n_components: int = 10,
+    n_clusters: int = 10,
+    n_pca_components: int | None = None,
     n_jobs: int | None = None,
     use_rep: str | None = None,
     embedding_key_added: str = "niche_embedding",
@@ -604,7 +606,7 @@ def calculate_niche_cellcharter(
        neighbors through ``distance`` graph hops.
     3. Combines the aggregated features according to ``aggregation`` to create
        a spatial-context embedding for every observation.
-    4. Fits a Gaussian mixture model with ``n_components`` mixture components.
+    4. Fits a Gaussian mixture model with ``n_clusters`` mixture components.
     5. Uses the GMM component assignments as niche labels.
 
     Consequently, each niche corresponds to a probabilistic cluster in a
@@ -632,12 +634,15 @@ def calculate_niche_cellcharter(
         Seeds the Gaussian mixture clustering step. When stratifying by ``library_key``,
         every library is fitted with an independent rng derived from it.
     %(niche_spatial_conn_key)s
-    n_components
-        Number of Gaussian mixture components used to assign niches.
-        Therefore, this parameter directly determines the number of niche
-        labels produced per library or dataset. When ``use_rep`` is given, the
-        embedding is also truncated to its first ``n_components`` columns, and a
-        narrower embedding is rejected.
+    n_clusters
+        Number of Gaussian mixture components, and therefore the number of niche
+        labels produced per library or dataset.
+    n_pca_components
+        Number of principal components kept when reducing the aggregated features. ``None``
+        uses :func:`scanpy.pp.pca`'s own default. Named for the PCA because
+        :class:`~sklearn.mixture.GaussianMixture` spells its cluster count ``n_components``
+        too; here that is ``n_clusters``. Rejected together with ``use_rep``, which supplies an
+        already reduced embedding and so skips the PCA.
     %(n_jobs_threads)s
     use_rep
         Key in ``adata.obsm`` containing a precomputed observation-level
@@ -654,23 +659,25 @@ def calculate_niche_cellcharter(
 
     """
 
-    embedder: NicheEmbedder
-    if use_rep is not None:
-        embedder = partial(_precomputed_embedding, obsm_key=use_rep, n_components=n_components)
-    else:
+    if use_rep is None:
         logg.warning(
             "CellCharter recommends to use a dimensionality reduced embedding of the data, e.g. a scVI embedding. Since 'use_rep' is not provided, PCA will be used as proxy - performance may be suboptimal."
         )
-        embedder = partial(
-            _nhop_pca_embedding,
-            distance=distance,
-            aggregation=aggregation,
-            spatial_connectivities_key=spatial_connectivities_key,
-            n_jobs=n_jobs,
-        )
+    elif n_pca_components is not None:
+        raise ValueError("'n_pca_components' sizes the PCA, which 'use_rep' replaces; pass one or the other")
+
+    embedder = partial(
+        _nhop_pca_embedding,
+        distance=distance,
+        aggregation=aggregation,
+        spatial_connectivities_key=spatial_connectivities_key,
+        use_rep=use_rep,
+        n_pca_components=n_pca_components,
+        n_jobs=n_jobs,
+    )
 
     # `GaussianMixture` is a `Clusterer` as it stands, so this flavor needs no wrapper
-    clusterers = {"cellcharter_niche": GaussianMixture(n_components=n_components, init_params="random_from_data")}
+    clusterers = {"cellcharter_niche": GaussianMixture(n_components=n_clusters, init_params="random_from_data")}
 
     return calculate_niche_custom(
         data,
@@ -748,6 +755,13 @@ def calculate_niche_spatialleiden(
     orig_adata = extract_adata_if_sdata(data, table_key=table_key)
 
     adata = orig_adata.copy() if copy else orig_adata
+
+    if mask is not None:
+        raise ValueError(
+            "'mask' keeps masked observations out of the niche fit, which SpatialLeiden cannot do: "
+            "it clusters the graphs themselves, so an observation either takes part or loses its "
+            "edges. Subset before 'spatial_neighbors' if the masked cells should not be neighbors."
+        )
 
     # normalise once here; everything below this point works with rngs only
     rng = np.random.default_rng(rng)
@@ -889,8 +903,10 @@ def calculate_niche_custom(
 
             lib_embedding = embedder(lib_adata)
             lib_adata.obsm[embedding_key_added] = lib_embedding
-            result_columns = _fit_clusterers(lib_adata, lib_embedding, clusterers, rng)
-            _postprocess_niche_results(lib_adata, result_columns, mask, min_niche_size, prefix=f"lib={lib_id}_")
+            result_columns = _fit_clusterers(
+                lib_adata, lib_embedding, clusterers, rng, keep=_fitted_on(lib_adata, mask)
+            )
+            _postprocess_niche_results(lib_adata, result_columns, min_niche_size, prefix=f"lib={lib_id}_")
 
             _merge_library_columns(adata, lib_adata, lib_indices, result_columns, seeded)
             added_columns = result_columns
@@ -905,8 +921,8 @@ def calculate_niche_custom(
     else:
         embedding = embedder(adata)
         adata.obsm[embedding_key_added] = embedding
-        result_columns = _fit_clusterers(adata, embedding, clusterers, rng)
-        _postprocess_niche_results(adata, result_columns, mask, min_niche_size)
+        result_columns = _fit_clusterers(adata, embedding, clusterers, rng, keep=_fitted_on(adata, mask))
+        _postprocess_niche_results(adata, result_columns, min_niche_size)
 
     # For SpatialData, the column names shouldn't have = sign. Hence, run sanitize_table.
     # TODO: In future, change the naming standard of any niche columns added to not have '=' to be compatible with spatialdata naming
@@ -1207,7 +1223,14 @@ def _utag_embedding(adata: AnnData, *, spatial_connectivities_key: str, use_laye
 
 
 def _nhop_pca_embedding(
-    adata: AnnData, *, distance: int, aggregation: str, spatial_connectivities_key: str, n_jobs: int | None = None
+    adata: AnnData,
+    *,
+    distance: int,
+    aggregation: str,
+    spatial_connectivities_key: str,
+    use_rep: str | None = None,
+    n_pca_components: int | None = None,
+    n_jobs: int | None = None,
 ) -> Array:
     """Disjoint hop rings of aggregated features, concatenated and reduced."""
     if aggregation not in ("mean", "variance"):
@@ -1230,7 +1253,9 @@ def _nhop_pca_embedding(
         )
 
     # hops are contiguous from 0, so hop 0 is just the first element and no lookup is needed
-    features = adata.X
+    if use_rep is not None:
+        assert_key_in_adata(adata, use_rep, attr="obsm")
+    features = adata.X if use_rep is None else adata.obsm[use_rep]
     rings = compute_hop_adjacency_matrices(adata.obsp[spatial_connectivities_key], distance, n_jobs=n_jobs)
     blocks = [features, *(_aggregate_over(ring, features, aggregation) for ring in rings)]
 
@@ -1240,24 +1265,12 @@ def _nhop_pca_embedding(
         aggregated = sparse_hstack(blocks, format="csr")
     else:
         aggregated = np.hstack([to_dense(block) for block in blocks])
-    return sc.pp.pca(aggregated)
 
-
-def _precomputed_embedding(adata: AnnData, *, obsm_key: str, n_components: int) -> Array:
-    """The first *n_components* columns of an embedding that already exists in ``adata.obsm``."""
-    assert_key_in_adata(adata, obsm_key, attr="obsm")
-    embedding = adata.obsm[obsm_key]
-    if embedding.shape[1] < n_components:
-        raise ValueError(
-            f"Embedding has {embedding.shape[1]} components, but n_components={n_components}. "
-            f"Please provide an embedding with at least {n_components} components."
-        )
-    return embedding[:, :n_components]
-
-
-############
-### clusterer classes
-############
+    # CellCharter reduces the expression it aggregates; an embedding supplied through `use_rep` is
+    # already reduced, so it goes to the clusterer as it is
+    if use_rep is not None:
+        return to_dense(aggregated)
+    return sc.pp.pca(aggregated) if n_pca_components is None else sc.pp.pca(aggregated, n_comps=n_pca_components)
 
 
 def _resolution_values(resolutions: Any, *, pairs_ok: bool) -> list[Any]:
@@ -1306,13 +1319,32 @@ def _leiden_clusterers(
     }
 
 
+def _fitted_on(adata: AnnData, mask: pd.Series | None) -> NDArray[np.bool_] | None:
+    """Which observations the niche model is fitted on, aligned to ``adata.obs_names``."""
+    if mask is None:
+        return None
+    if not mask.index.isin(adata.obs_names).any():
+        raise ValueError("'mask' shares no index value with 'adata.obs', so it masks nothing")
+    # observations the mask says nothing about are kept, which is how the documented example
+    # of a three-entry mask is meant to read
+    keep = mask.reindex(adata.obs_names, fill_value=True).to_numpy(dtype=bool)
+    if not keep.any():
+        raise ValueError("'mask' excludes every observation, so no niche could be assigned")
+    return keep
+
+
 def _fit_clusterers(
     adata: AnnData,
     embedding: Array,
     clusterers: Mapping[str, Clusterer],
     rng: np.random.Generator,
+    keep: NDArray[np.bool_] | None = None,
 ) -> list[str]:
-    """Fit each clusterer on *embedding* and write its labels, returning the column names."""
+    """Fit each clusterer on *embedding* and write its labels, returning the column names.
+
+    *keep* restricts the fit to those observations; the rest are labelled ``'not_a_niche'``
+    without having taken part in it.
+    """
     for column, clusterer in clusterers.items():
         # `isinstance` sees method presence only, so check the one parameter the pipeline sets:
         # a deterministic estimator such as DBSCAN satisfies the protocol and then rejects it
@@ -1327,7 +1359,12 @@ def _fit_clusterers(
             logg.info(f"Overwriting existing column '{column}'")
         # a fresh clone per fit, so the estimator handed in is never mutated
         fit = clone(clusterer).set_params(random_state=legacy_random(rng))
-        adata.obs[column] = pd.Categorical(fit.fit_predict(embedding))
+        if keep is None:
+            labels = np.asarray(fit.fit_predict(embedding)).astype(str)
+        else:
+            labels = np.full(adata.n_obs, "not_a_niche", dtype=object)
+            labels[keep] = np.asarray(fit.fit_predict(embedding[keep])).astype(str)
+        adata.obs[column] = pd.Categorical(labels)
     return list(clusterers)
 
 
@@ -1391,14 +1428,13 @@ def _spatialleiden_once(
         )
 
     result_columns = [f"spatialleiden_res={res}" for res in resolution_list]
-    _postprocess_niche_results(adata, result_columns, mask, min_niche_size, prefix)
+    _postprocess_niche_results(adata, result_columns, min_niche_size, prefix)
     return result_columns
 
 
 def _postprocess_niche_results(
     adata: AnnData,
     result_columns: list[str],
-    mask: pd.Series | None = None,
     min_niche_size: int | None = None,
     prefix: str | None = None,
 ) -> None:
@@ -1410,10 +1446,6 @@ def _postprocess_niche_results(
         Annotated data matrix.
     result_columns
         Columns in ``adata.obs`` holding the niche assignments to refine.
-    mask
-        Boolean :class:`~pandas.Series` indexed like ``adata.obs``. Observations that
-        are ``False`` get the label ``"not_a_niche"``, e.g.
-        ``Series([False, False, True], index=["a", "b", "c"])``.
     min_niche_size
         Niches with fewer than this many observations are relabeled ``"not_a_niche"``.
     prefix
@@ -1424,16 +1456,12 @@ def _postprocess_niche_results(
     Columns are modified in place, so the niche column name does not depend on
     which of these options were supplied.
     """
-    if mask is None and min_niche_size is None and prefix is None:
+    if min_niche_size is None and prefix is None:
         return
 
     for col in result_columns:
         # str, so that "not_a_niche" and prefixed labels can be assigned regardless of the clusterer's dtype
         labels = adata.obs[col].astype(str)
-
-        if mask is not None:
-            aligned = mask[mask.index.isin(adata.obs.index)]
-            labels[~aligned] = "not_a_niche"
 
         if min_niche_size is not None:
             counts = labels.value_counts()

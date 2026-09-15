@@ -18,11 +18,12 @@ from squidpy.gr import (
     calculate_niche,
     calculate_niche_cellcharter,
     calculate_niche_neighborhood,
+    calculate_niche_spatialleiden,
     calculate_niche_utag,
     spatial_neighbors_knn,
 )
 from squidpy.gr._nhood import _aggregate_over, nhood_aggregate
-from squidpy.gr._niche import _fit_clusterers, _precomputed_embedding, compute_hop_adjacency_matrices
+from squidpy.gr._niche import _fit_clusterers, compute_hop_adjacency_matrices
 
 N_NEIGHBORS = 20
 
@@ -262,7 +263,7 @@ def test_calculate_niche_deprecation_is_a_future_warning(dummy_adata2: AnnData):
 def test_cellcharter_rejects_a_distance_below_one(dummy_adata2: AnnData, distance: int):
     spatial_neighbors_knn(dummy_adata2, n_neighs=3)
     with pytest.raises(ValueError, match=r"'distance' must be >= 1"):
-        calculate_niche_cellcharter(dummy_adata2, distance=distance, n_components=2, rng=0)
+        calculate_niche_cellcharter(dummy_adata2, distance=distance, n_clusters=2, rng=0)
 
 
 def test_neighborhood_profile_weights_by_path_count(dummy_adata2: AnnData):
@@ -428,7 +429,7 @@ def test_nhood_aggregate_sums_cancelling_weights():
 def test_niche_rejects_an_unusable_embedding_key(key):
     "`obsm[None]` is accepted by AnnData and only fails later, at write_h5ad."
     with pytest.raises(ValueError, match=r"'embedding_key_added' must be a non-empty string"):
-        calculate_niche_cellcharter(_tiny(), distance=2, n_components=2, rng=0, embedding_key_added=key)
+        calculate_niche_cellcharter(_tiny(), distance=2, n_clusters=2, rng=0, embedding_key_added=key)
 
 
 def test_niche_library_key_with_a_skipped_first_library_still_writes_labels():
@@ -450,9 +451,9 @@ def test_niche_library_key_with_no_usable_library_raises():
 def test_niche_library_key_rerun_overwrites_labels():
     "A second in-place call must not keep the first run's labels."
     adata = _tiny(n=40, libraries=["a"] * 20 + ["b"] * 20)
-    calculate_niche_cellcharter(adata, distance=2, n_components=2, rng=0, library_key="library")
+    calculate_niche_cellcharter(adata, distance=2, n_clusters=2, rng=0, library_key="library")
     first = np.asarray(adata.obs["cellcharter_niche"].astype(str)).copy()
-    calculate_niche_cellcharter(adata, distance=2, n_components=4, rng=99, library_key="library")
+    calculate_niche_cellcharter(adata, distance=2, n_clusters=4, rng=99, library_key="library")
     second = np.asarray(adata.obs["cellcharter_niche"].astype(str))
     assert not (first == second).all(), "the re-run silently kept the previous labels"
 
@@ -462,7 +463,7 @@ def test_weighted_graph_warning_points_at_the_caller():
     adata = _tiny()
     spatial_neighbors_knn(adata, n_neighs=4, transform="spectral")
     with pytest.warns(UserWarning, match="non-binary") as caught:
-        calculate_niche_cellcharter(adata, distance=2, n_components=2, rng=0)
+        calculate_niche_cellcharter(adata, distance=2, n_clusters=2, rng=0)
     assert caught[0].filename == __file__, f"attributed to {caught[0].filename}"
 
 
@@ -506,15 +507,38 @@ def test_library_key_writes_no_pooled_embedding():
     assert "utag_niche_res=1.0" in adata.obs, "the labels must still be written"
 
 
-def test_use_rep_is_truncated_to_n_components():
-    "v1.8.3 and main both clustered only the first `n_components` columns of `use_rep`."
-    adata = _tiny(embedding_cols=20)
-    assert _precomputed_embedding(adata, obsm_key="emb", n_components=10).shape[1] == 10
+def test_use_rep_is_aggregated_over_the_hop_rings():
+    "CellCharter aggregates the representation; `use_rep` used to replace the whole embedder."
+    adata = _tiny(n=60, embedding_cols=6)
+    scrambled = _tiny(n=60, embedding_cols=6)
+    rng = np.random.default_rng(7)
+    scrambled.obsm["spatial"] = rng.random((60, 2)) * 10
+    del scrambled.obsp["spatial_connectivities"], scrambled.obsp["spatial_distances"]
+    spatial_neighbors_knn(scrambled, n_neighs=4)
+
+    labels = []
+    for a in (adata, scrambled):
+        calculate_niche_cellcharter(a, use_rep="emb", n_clusters=3, distance=2, rng=0)
+        labels.append(np.asarray(a.obs["cellcharter_niche"].astype(str)))
+    assert not (labels[0] == labels[1]).all(), "the spatial graph did not affect the result"
 
 
-def test_use_rep_narrower_than_n_components_is_rejected():
-    with pytest.raises(ValueError, match=r"Embedding has 5 components, but n_components=10"):
-        calculate_niche_cellcharter(_tiny(embedding_cols=5), use_rep="emb", n_components=10, rng=0)
+def test_use_rep_narrower_than_n_clusters_is_accepted():
+    "A k-cluster GMM is well posed in any dimensionality; the old guard required k columns."
+    adata = _tiny(embedding_cols=2)
+    calculate_niche_cellcharter(adata, use_rep="emb", n_clusters=5, distance=1, rng=0)
+    assert adata.obs["cellcharter_niche"].nunique() <= 5
+
+
+def test_n_pca_components_sizes_the_pca():
+    adata = _tiny(n=60)
+    calculate_niche_cellcharter(adata, n_clusters=3, n_pca_components=4, distance=1, rng=0)
+    assert adata.obsm["niche_embedding"].shape[1] == 4
+
+
+def test_n_pca_components_is_rejected_with_use_rep():
+    with pytest.raises(ValueError, match=r"'n_pca_components' sizes the PCA, which 'use_rep' replaces"):
+        calculate_niche_cellcharter(_tiny(embedding_cols=6), use_rep="emb", n_pca_components=3, rng=0)
 
 
 # ---------------------------------------------------------------- oracles and scale
@@ -593,7 +617,7 @@ def test_cellcharter_concatenates_hop_zero_with_every_ring(monkeypatch, distance
         return original(matrix, *args, **kwargs)
 
     monkeypatch.setattr(sc.pp, "pca", spy)
-    calculate_niche_cellcharter(adata, distance=distance, n_components=2, rng=0)
+    calculate_niche_cellcharter(adata, distance=distance, n_clusters=2, rng=0)
     assert seen == [(distance + 1) * adata.n_vars], f"PCA was handed {seen} columns"
 
 
@@ -606,7 +630,7 @@ def test_cellcharter_keeps_the_container_through_the_embedding(sparse: bool):
     adata.obsm["spatial"] = rng.random((50, 2)) * 10
     spatial_neighbors_knn(adata, n_neighs=4)
 
-    calculate_niche_cellcharter(adata, distance=2, n_components=3, rng=0)
+    calculate_niche_cellcharter(adata, distance=2, n_clusters=3, rng=0)
     assert "cellcharter_niche" in adata.obs
     assert str(adata.obs["cellcharter_niche"].dtype) == "category"
 
@@ -614,7 +638,7 @@ def test_cellcharter_keeps_the_container_through_the_embedding(sparse: bool):
 def test_cellcharter_with_a_library_key():
     "The stratified GMM path had no test at all once the seeding test was removed."
     adata = _tiny(n=60, libraries=["s1"] * 30 + ["s2"] * 30)
-    calculate_niche_cellcharter(adata, distance=2, n_components=2, rng=0, library_key="library")
+    calculate_niche_cellcharter(adata, distance=2, n_clusters=2, rng=0, library_key="library")
 
     labels = adata.obs["cellcharter_niche"].astype(str)
     assert str(adata.obs["cellcharter_niche"].dtype) == "category"
@@ -658,3 +682,64 @@ def test_the_new_entry_points_validate_resolutions_too(dummy_adata2: AnnData):
         calculate_niche_utag(dummy_adata2, resolutions="high", n_neighbors=3, rng=0)
     with pytest.warns(FutureWarning), pytest.raises(TypeError, match=r"'resolutions' must be numbers"):
         calculate_niche(dummy_adata2, flavor="utag", resolutions="high", n_neighbors=3, rng=0)
+
+
+def test_mask_excludes_cells_from_the_clustering():
+    "Masked cells used to be clustered and then relabelled, so they still shaped the niches."
+    adata = _tiny(n=120)
+    spied: list[int] = []
+    original = _niche.LeidenClusterer.fit
+
+    def spy(self, X, y=None):
+        spied.append(X.shape[0])
+        return original(self, X, y)
+
+    keep = pd.Series(np.arange(120) < 80, index=adata.obs_names)
+    _niche.LeidenClusterer.fit = spy
+    try:
+        calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=0, mask=keep)
+    finally:
+        _niche.LeidenClusterer.fit = original
+    assert spied == [80], f"the clusterer was fitted on {spied} observations, not the kept 80"
+    labels = adata.obs["utag_niche_res=1.0"].astype(str)
+    assert (labels[80:] == "not_a_niche").all()
+    assert (labels[:80] != "not_a_niche").all()
+
+
+def test_mask_accepts_a_partial_index():
+    "The documented example is a three-entry mask; it used to raise an IndexingError."
+    adata = _tiny(n=60)
+    partial = Series([False, False, True], index=["0", "1", "2"])
+    partial.index = adata.obs_names[:3]
+    calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=0, mask=partial)
+    labels = adata.obs["utag_niche_res=1.0"].astype(str)
+    assert (labels[:2] == "not_a_niche").all(), "the two False entries must be excluded"
+    assert (labels[2:] != "not_a_niche").all(), "everything the mask omits is kept"
+
+
+@pytest.mark.parametrize(
+    ("index", "match"),
+    [
+        pytest.param(["zz", "yy"], r"shares no index value", id="wrong index entirely"),
+        pytest.param(None, r"excludes every observation", id="excludes everything"),
+    ],
+)
+def test_mask_rejects_what_it_cannot_mean(index, match):
+    adata = _tiny(n=40)
+    mask = (
+        Series([False, False], index=index)
+        if index is not None
+        else Series(np.zeros(40, dtype=bool), index=adata.obs_names)
+    )
+    with pytest.raises(ValueError, match=match):
+        calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=0, mask=mask)
+
+
+def test_spatialleiden_refuses_a_mask():
+    "It clusters the graphs, so an observation cannot be kept as a neighbor but dropped from the fit."
+    adata = _tiny(n=50)
+    sc.pp.pca(adata, n_comps=4)
+    sc.pp.neighbors(adata, n_neighbors=6, random_state=0)
+    keep = Series(np.arange(50) < 30, index=adata.obs_names)
+    with pytest.raises(ValueError, match=r"SpatialLeiden cannot do"):
+        calculate_niche_spatialleiden(adata, resolutions=0.5, rng=0, mask=keep)
