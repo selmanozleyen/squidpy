@@ -241,6 +241,12 @@ _niche_embedding_key_added = """\
 embedding_key_added
     Controls the name of the key to be added in :attr:`anndata.AnnData.obsm`, which will hold
     the niche embedding computed."""
+_niche_use_rep = """\
+use_rep
+    Key in :attr:`anndata.AnnData.obsm` holding an embedding to cluster directly. When given,
+    this flavor's own embedding step is skipped, so the arguments that only fed it are rejected.
+    Use it to cluster one representation shared across libraries, rather than the per-library
+    embedding this function derives by default."""
 _niche_mask = """\
 mask
     Boolean :class:`pandas.Series` indexed like :attr:`anndata.AnnData.obs`. Observations that
@@ -520,6 +526,7 @@ d = DocstringProcessor(
     library_key=_library_key,
     niche_spatial_conn_key=_niche_spatial_conn_key,
     niche_embedding_key_added=_niche_embedding_key_added,
+    niche_use_rep=_niche_use_rep,
     niche_mask=_niche_mask,
     niche_min_niche_size=_niche_min_niche_size,
     niche_common_params=_niche_common_params,

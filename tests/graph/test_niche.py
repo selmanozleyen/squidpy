@@ -658,3 +658,63 @@ def test_the_new_entry_points_validate_resolutions_too(dummy_adata2: AnnData):
         calculate_niche_utag(dummy_adata2, resolutions="high", n_neighbors=3, rng=0)
     with pytest.warns(FutureWarning), pytest.raises(TypeError, match=r"'resolutions' must be numbers"):
         calculate_niche(dummy_adata2, flavor="utag", resolutions="high", n_neighbors=3, rng=0)
+
+
+@pytest.mark.parametrize(
+    ("fn", "column", "extra"),
+    [
+        pytest.param(calculate_niche_neighborhood, "nhood_niche_res=1.0", {}, id="neighborhood"),
+        pytest.param(calculate_niche_utag, "utag_niche_res=1.0", {}, id="utag"),
+    ],
+)
+def test_use_rep_clusters_a_supplied_embedding(fn, column, extra):
+    "A shared representation can be clustered instead of the per-library one this derives."
+    adata = _tiny(embedding_cols=6)
+    fn(adata, resolutions=1.0, n_neighbors=4, rng=0, use_rep="emb", **extra)
+    _assert_all_assigned(adata, column)
+
+
+def test_use_rep_is_not_truncated_where_there_is_no_n_components():
+    "cellcharter truncates to `n_components`; these two have no such parameter."
+    adata = _tiny(embedding_cols=6)
+    seen: list[int] = []
+    original = _niche._precomputed_embedding
+
+    def spy(adata_arg, **kwargs):
+        out = original(adata_arg, **kwargs)
+        seen.append(out.shape[1])
+        return out
+
+    _niche._precomputed_embedding = spy
+    try:
+        calculate_niche_utag(adata, resolutions=1.0, n_neighbors=4, rng=0, use_rep="emb")
+    finally:
+        _niche._precomputed_embedding = original
+    assert seen == [6], f"width handed to the clusterer was {seen}"
+
+
+@pytest.mark.parametrize(
+    ("fn", "kwargs", "match"),
+    [
+        pytest.param(
+            calculate_niche_neighborhood,
+            {"groups": "ct", "use_rep": "emb"},
+            r"pass at most one of 'groups', 'use_rep'",
+            id="neighborhood groups+use_rep",
+        ),
+        pytest.param(
+            calculate_niche_neighborhood, {}, r"pass either 'groups' .* or 'use_rep'", id="neighborhood neither"
+        ),
+        pytest.param(
+            calculate_niche_utag,
+            {"use_layer": "counts", "use_rep": "emb"},
+            r"pass at most one of 'use_layer', 'use_rep'",
+            id="utag use_layer+use_rep",
+        ),
+    ],
+)
+def test_use_rep_rejects_the_arguments_it_replaces(fn, kwargs, match):
+    adata = _tiny(embedding_cols=6)
+    adata.layers["counts"] = adata.X.copy()
+    with pytest.raises(ValueError, match=match):
+        fn(adata, resolutions=1.0, n_neighbors=4, rng=0, **kwargs)

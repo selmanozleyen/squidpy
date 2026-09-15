@@ -299,7 +299,8 @@ def calculate_niche(
 def calculate_niche_neighborhood(
     data: AnnData | SpatialData,
     *,
-    groups: str,
+    groups: str | None = None,
+    use_rep: str | None = None,
     resolutions: float | list[float],
     n_neighbors: int = 15,
     spatial_connectivities_key: str = "spatial_connectivities",
@@ -368,6 +369,7 @@ def calculate_niche_neighborhood(
         Number of nearest neighbors used to construct the k-nearest-neighbor
         graph on the neighborhood composition embedding before Leiden
         clustering.
+    %(niche_use_rep)s
     %(niche_spatial_conn_key)s
     scale
         Whether to z-score each neighborhood-profile feature across
@@ -410,15 +412,22 @@ def calculate_niche_neighborhood(
 
     """
 
-    embedder = partial(
-        _nhood_profile_embedding,
-        groups=groups,
-        spatial_connectivities_key=spatial_connectivities_key,
-        scale=scale,
-        distance=distance,
-        abs_nhood=abs_nhood,
-        n_hop_weights=n_hop_weights,
-    )
+    embedder: NicheEmbedder
+    if use_rep is not None:
+        _assert_one_embedding_source(groups=groups, use_rep=use_rep)
+        embedder = partial(_precomputed_embedding, obsm_key=use_rep)
+    else:
+        if groups is None:
+            raise ValueError("pass either 'groups' to build a composition profile, or 'use_rep'")
+        embedder = partial(
+            _nhood_profile_embedding,
+            groups=groups,
+            spatial_connectivities_key=spatial_connectivities_key,
+            scale=scale,
+            distance=distance,
+            abs_nhood=abs_nhood,
+            n_hop_weights=n_hop_weights,
+        )
 
     clusterers = _leiden_clusterers(
         base_colname="nhood_niche",
@@ -449,6 +458,7 @@ def calculate_niche_utag(
     resolutions: float | list[float],
     n_neighbors: int = 15,
     use_layer: str | None = None,
+    use_rep: str | None = None,
     spatial_connectivities_key: str = "spatial_connectivities",
     embedding_key_added: str = "niche_embedding",
     min_niche_size: int | None = None,
@@ -516,6 +526,7 @@ def calculate_niche_utag(
         another observation-by-feature representation appropriate for local
         aggregation. The selected matrix determines what biological signal is
         used to define niches.
+    %(niche_use_rep)s
     %(niche_spatial_conn_key)s
     %(niche_common_params)s
     %(table_key)s
@@ -530,7 +541,12 @@ def calculate_niche_utag(
 
     """
 
-    embedder = partial(_utag_embedding, spatial_connectivities_key=spatial_connectivities_key, use_layer=use_layer)
+    embedder: NicheEmbedder
+    if use_rep is not None:
+        _assert_one_embedding_source(use_layer=use_layer, use_rep=use_rep)
+        embedder = partial(_precomputed_embedding, obsm_key=use_rep)
+    else:
+        embedder = partial(_utag_embedding, spatial_connectivities_key=spatial_connectivities_key, use_layer=use_layer)
 
     clusterers = _leiden_clusterers(
         base_colname="utag_niche",
@@ -1243,10 +1259,19 @@ def _nhop_pca_embedding(
     return sc.pp.pca(aggregated)
 
 
-def _precomputed_embedding(adata: AnnData, *, obsm_key: str, n_components: int) -> Array:
-    """The first *n_components* columns of an embedding that already exists in ``adata.obsm``."""
+def _assert_one_embedding_source(**sources: str | None) -> None:
+    """``use_rep`` replaces the embedder, so the arguments that only fed it must be unset."""
+    given = sorted(name for name, value in sources.items() if value is not None)
+    if len(given) > 1:
+        raise ValueError(f"pass at most one of {', '.join(repr(n) for n in given)}")
+
+
+def _precomputed_embedding(adata: AnnData, *, obsm_key: str, n_components: int | None = None) -> Array:
+    """An embedding that already exists in ``adata.obsm``, truncated to *n_components* if given."""
     assert_key_in_adata(adata, obsm_key, attr="obsm")
     embedding = adata.obsm[obsm_key]
+    if n_components is None:
+        return embedding
     if embedding.shape[1] < n_components:
         raise ValueError(
             f"Embedding has {embedding.shape[1]} components, but n_components={n_components}. "
