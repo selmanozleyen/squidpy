@@ -907,9 +907,9 @@ def compute_hop_adjacency_matrices(
     if max_hop < 1:
         raise ValueError(f"max_hop must be >= 1, got {max_hop}.")
 
-    shape = adjacency_matrix_orig.shape
+    shape = np.shape(adjacency_matrix_orig)
     if len(shape) != 2 or shape[0] != shape[1]:
-        raise ValueError(f"adjacency matrix must be square, got {shape}")
+        raise ValueError(f"'adjacency_matrix' must be square, got {shape}")
 
     adj = (adjacency_matrix_orig if issparse(adjacency_matrix_orig) else csr_array(adjacency_matrix_orig)).tocsr()
     adj = adj.astype(bool)
@@ -1013,7 +1013,7 @@ def nhood_aggregate(
         raise ValueError(f"'aggregation' must be 'mean', 'sum' or 'variance', got {aggregation!r}")
     weights = [1.0] * len(hops) if hop_weights is None else list(hop_weights)
     if len(weights) != len(hops):
-        raise ValueError(f"'hop_weights' has {len(weights)} value(s) but there are {len(hops)} hops")
+        raise ValueError(f"'hop_weights' has {len(weights)} value(s) but there are {len(hops)} hop(s)")
     if aggregation != "sum" and sum(weights) == 0:
         raise ValueError("'hop_weights' must not sum to zero, since the hops are averaged over it")
 

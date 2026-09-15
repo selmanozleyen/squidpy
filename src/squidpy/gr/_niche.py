@@ -768,6 +768,8 @@ def calculate_niche_spatialleiden(
 
         # bound even when every library is empty and the loop body never runs
         added_columns: list[str] = []
+        seeded: set[str] = set()
+        resolution_list = resolutions if isinstance(resolutions, list) else [resolutions]
 
         # go through each library_id and process the corresponding adata subset
         for itr, lib_id in enumerate(library_ids):
@@ -799,9 +801,12 @@ def calculate_niche_spatialleiden(
                 table_key=table_key,
             )
 
-            if itr == 0:
-                added_columns = list(set(lib_adata.obs.columns) - set(adata.obs.columns))
-            _merge_library_columns(adata, lib_adata, lib_indices, added_columns)
+            result_columns = [f"spatialleiden_res={res}" for res in resolution_list]
+            _merge_library_columns(adata, lib_adata, lib_indices, result_columns, seeded)
+            added_columns = result_columns
+
+        if library_ids.size and not added_columns:
+            raise ValueError(f"no observation has a '{library_key}', so no niche could be assigned")
 
         # the per-library labels go in as strings, so cast once every library has been seen
         for col in added_columns:
@@ -865,8 +870,10 @@ def _calculate_niche_custom(
     %(adata)s
     embedder
         Any ``(AnnData) -> Array`` callable returning one row per observation.
-    clusterer
+    clusterers
         The clusterer labelling each ``adata.obs`` column, keyed by name.
+    rng
+        Seeds every fit.
     %(niche_common_params)s
     %(table_key)s
 
@@ -907,9 +914,11 @@ def _calculate_niche_custom(
 
         # bound even when every library is empty and the loop body never runs
         added_columns: list[str] = []
+        seeded: set[str] = set()
+        library_ids = adata.obs[library_key].unique()
 
         # go through each library_id and process the corresponding adata subset
-        for itr, lib_id in enumerate(adata.obs[library_key].unique()):
+        for lib_id in library_ids:
             logg.info(f"Processing library '{lib_id}'")
 
             lib_indices = adata.obs[adata.obs[library_key] == lib_id].index
@@ -924,9 +933,11 @@ def _calculate_niche_custom(
             result_columns = _fit_clusterers(lib_adata, lib_embedding, clusterers, rng)
             _postprocess_niche_results(lib_adata, result_columns, mask, min_niche_size, prefix=f"lib={lib_id}_")
 
-            if itr == 0:
-                added_columns = list(set(lib_adata.obs.columns) - set(adata.obs.columns))
-            _merge_library_columns(adata, lib_adata, lib_indices, added_columns)
+            _merge_library_columns(adata, lib_adata, lib_indices, result_columns, seeded)
+            added_columns = result_columns
+
+        if library_ids.size and not added_columns:
+            raise ValueError(f"no observation has a '{library_key}', so no niche could be assigned")
 
         # the per-library labels go in as strings, so cast once every library has been seen
         for col in added_columns:
@@ -1320,9 +1331,16 @@ def _fit_clusterers(
     rng: np.random.Generator,
 ) -> list[str]:
     """Fit each clusterer on *embedding* and write its labels, returning the column names."""
-    # one generator per clusterer, so a resolution sweep is seeded independently of its length
-    generators = rng.spawn(len(clusterers))
-    for (column, clusterer), rng in zip(clusterers.items(), generators, strict=True):
+    for column, clusterer in clusterers.items():
+        # `isinstance` sees method presence only, so check the one parameter the pipeline sets:
+        # a deterministic estimator such as DBSCAN satisfies the protocol and then rejects it
+        if not isinstance(clusterer, Clusterer):
+            raise TypeError(f"clusterer for '{column}' must implement fit_predict, get_params and set_params")
+        if "random_state" not in clusterer.get_params():
+            raise TypeError(f"clusterer for '{column}' has no 'random_state', so the pipeline cannot seed its fits")
+    # one rng per clusterer, so a resolution sweep is seeded independently of its length
+    rngs = rng.spawn(len(clusterers))
+    for (column, clusterer), rng in zip(clusterers.items(), rngs, strict=True):
         if column in adata.obs.columns:
             logg.info(f"Overwriting existing column '{column}'")
         # a fresh clone per fit, so the estimator handed in is never mutated
@@ -1341,11 +1359,15 @@ def _merge_library_columns(
     lib_adata: AnnData,
     lib_indices: pd.Index,
     columns: list[str],
+    seeded: set[str],
 ) -> None:
-    """Write one library's niche columns back into *adata*, seeding absent ones."""
+    """Write one library's niche columns back into *adata*, seeding each once per run."""
     for col in columns:
-        if col not in adata.obs:
+        if col not in seeded:
+            # a fresh object column: a previous run leaves a categorical here, which would
+            # reject this run's unseen labels and silently keep the old ones
             adata.obs[col] = "not_a_niche"
+            seeded.add(col)
         adata.obs.loc[lib_indices, col] = list(lib_adata.obs[col].astype("str"))
 
 
