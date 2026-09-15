@@ -12,6 +12,7 @@ import scanpy as sc
 from anndata import AnnData
 from fast_array_utils.conv import to_dense
 from fast_array_utils.types import HasArrayNamespace as Array
+from numpy.typing import NDArray
 from scipy.sparse import hstack as sparse_hstack
 from scipy.sparse import issparse
 from sklearn.base import clone
@@ -895,8 +896,10 @@ def calculate_niche_custom(
 
             lib_embedding = embedder(lib_adata)
             lib_adata.obsm[embedding_key_added] = lib_embedding
-            result_columns = _fit_clusterers(lib_adata, lib_embedding, clusterers, rng)
-            _postprocess_niche_results(lib_adata, result_columns, mask, min_niche_size, prefix=f"lib={lib_id}_")
+            result_columns = _fit_clusterers(
+                lib_adata, lib_embedding, clusterers, rng, keep=_fitted_on(lib_adata, mask)
+            )
+            _postprocess_niche_results(lib_adata, result_columns, min_niche_size, prefix=f"lib={lib_id}_")
 
             _merge_library_columns(adata, lib_adata, lib_indices, result_columns, seeded)
             added_columns = result_columns
@@ -911,8 +914,8 @@ def calculate_niche_custom(
     else:
         embedding = embedder(adata)
         adata.obsm[embedding_key_added] = embedding
-        result_columns = _fit_clusterers(adata, embedding, clusterers, rng)
-        _postprocess_niche_results(adata, result_columns, mask, min_niche_size)
+        result_columns = _fit_clusterers(adata, embedding, clusterers, rng, keep=_fitted_on(adata, mask))
+        _postprocess_niche_results(adata, result_columns, min_niche_size)
 
     # For SpatialData, the column names shouldn't have = sign. Hence, run sanitize_table.
     # TODO: In future, change the naming standard of any niche columns added to not have '=' to be compatible with spatialdata naming
@@ -1309,13 +1312,32 @@ def _leiden_clusterers(
     }
 
 
+def _fitted_on(adata: AnnData, mask: pd.Series | None) -> NDArray[np.bool_] | None:
+    """Which observations the niche model is fitted on, aligned to ``adata.obs_names``."""
+    if mask is None:
+        return None
+    if not mask.index.isin(adata.obs_names).any():
+        raise ValueError("'mask' shares no index value with 'adata.obs', so it masks nothing")
+    # observations the mask says nothing about are kept, which is how the documented example
+    # of a three-entry mask is meant to read
+    keep = mask.reindex(adata.obs_names, fill_value=True).to_numpy(dtype=bool)
+    if not keep.any():
+        raise ValueError("'mask' excludes every observation, so no niche could be assigned")
+    return keep
+
+
 def _fit_clusterers(
     adata: AnnData,
     embedding: Array,
     clusterers: Mapping[str, Clusterer],
     rng: np.random.Generator,
+    keep: NDArray[np.bool_] | None = None,
 ) -> list[str]:
-    """Fit each clusterer on *embedding* and write its labels, returning the column names."""
+    """Fit each clusterer on *embedding* and write its labels, returning the column names.
+
+    *keep* restricts the fit to those observations; the rest are labelled ``'not_a_niche'``
+    without having taken part in it.
+    """
     for column, clusterer in clusterers.items():
         # `isinstance` sees method presence only, so check the one parameter the pipeline sets:
         # a deterministic estimator such as DBSCAN satisfies the protocol and then rejects it
@@ -1330,7 +1352,12 @@ def _fit_clusterers(
             logg.info(f"Overwriting existing column '{column}'")
         # a fresh clone per fit, so the estimator handed in is never mutated
         fit = clone(clusterer).set_params(random_state=legacy_random(rng))
-        adata.obs[column] = pd.Categorical(fit.fit_predict(embedding))
+        if keep is None:
+            labels = np.asarray(fit.fit_predict(embedding)).astype(str)
+        else:
+            labels = np.full(adata.n_obs, "not_a_niche", dtype=object)
+            labels[keep] = np.asarray(fit.fit_predict(embedding[keep])).astype(str)
+        adata.obs[column] = pd.Categorical(labels)
     return list(clusterers)
 
 
@@ -1394,14 +1421,19 @@ def _spatialleiden_once(
         )
 
     result_columns = [f"spatialleiden_res={res}" for res in resolution_list]
-    _postprocess_niche_results(adata, result_columns, mask, min_niche_size, prefix)
+    keep = _fitted_on(adata, mask)
+    if keep is not None:
+        for col in result_columns:
+            labels = adata.obs[col].astype(str)
+            labels[~keep] = "not_a_niche"
+            adata.obs[col] = labels
+    _postprocess_niche_results(adata, result_columns, min_niche_size, prefix)
     return result_columns
 
 
 def _postprocess_niche_results(
     adata: AnnData,
     result_columns: list[str],
-    mask: pd.Series | None = None,
     min_niche_size: int | None = None,
     prefix: str | None = None,
 ) -> None:
@@ -1413,10 +1445,6 @@ def _postprocess_niche_results(
         Annotated data matrix.
     result_columns
         Columns in ``adata.obs`` holding the niche assignments to refine.
-    mask
-        Boolean :class:`~pandas.Series` indexed like ``adata.obs``. Observations that
-        are ``False`` get the label ``"not_a_niche"``, e.g.
-        ``Series([False, False, True], index=["a", "b", "c"])``.
     min_niche_size
         Niches with fewer than this many observations are relabeled ``"not_a_niche"``.
     prefix
@@ -1427,16 +1455,12 @@ def _postprocess_niche_results(
     Columns are modified in place, so the niche column name does not depend on
     which of these options were supplied.
     """
-    if mask is None and min_niche_size is None and prefix is None:
+    if min_niche_size is None and prefix is None:
         return
 
     for col in result_columns:
         # str, so that "not_a_niche" and prefixed labels can be assigned regardless of the clusterer's dtype
         labels = adata.obs[col].astype(str)
-
-        if mask is not None:
-            aligned = mask[mask.index.isin(adata.obs.index)]
-            labels[~aligned] = "not_a_niche"
 
         if min_niche_size is not None:
             counts = labels.value_counts()
