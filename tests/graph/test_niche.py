@@ -738,3 +738,54 @@ def test_the_new_entry_points_validate_resolutions_too(dummy_adata2: AnnData):
         calculate_niche_utag(dummy_adata2, resolutions="high", n_neighbors=3, rng=0)
     with pytest.warns(FutureWarning), pytest.raises(TypeError, match=r"'resolutions' must be numbers"):
         calculate_niche(dummy_adata2, flavor="utag", resolutions="high", n_neighbors=3, rng=0)
+
+
+def test_mask_excludes_cells_from_the_clustering():
+    "Masked cells used to be clustered and then relabelled, so they still shaped the niches."
+    adata = _tiny(n=120)
+    spied: list[int] = []
+    original = _niche.LeidenClusterer.fit
+
+    def spy(self, X, y=None):
+        spied.append(X.shape[0])
+        return original(self, X, y)
+
+    keep = pd.Series(np.arange(120) < 80, index=adata.obs_names)
+    _niche.LeidenClusterer.fit = spy
+    try:
+        calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=0, mask=keep)
+    finally:
+        _niche.LeidenClusterer.fit = original
+    assert spied == [80], f"the clusterer was fitted on {spied} observations, not the kept 80"
+    labels = adata.obs["utag_niche_res=1.0"].astype(str)
+    assert (labels[80:] == "not_a_niche").all()
+    assert (labels[:80] != "not_a_niche").all()
+
+
+def test_mask_accepts_a_partial_index():
+    "The documented example is a three-entry mask; it used to raise an IndexingError."
+    adata = _tiny(n=60)
+    partial = Series([False, False, True], index=["0", "1", "2"])
+    partial.index = adata.obs_names[:3]
+    calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=0, mask=partial)
+    labels = adata.obs["utag_niche_res=1.0"].astype(str)
+    assert (labels[:2] == "not_a_niche").all(), "the two False entries must be excluded"
+    assert (labels[2:] != "not_a_niche").all(), "everything the mask omits is kept"
+
+
+@pytest.mark.parametrize(
+    ("index", "match"),
+    [
+        pytest.param(["zz", "yy"], r"shares no index value", id="wrong index entirely"),
+        pytest.param(None, r"excludes every observation", id="excludes everything"),
+    ],
+)
+def test_mask_rejects_what_it_cannot_mean(index, match):
+    adata = _tiny(n=40)
+    mask = (
+        Series([False, False], index=index)
+        if index is not None
+        else Series(np.zeros(40, dtype=bool), index=adata.obs_names)
+    )
+    with pytest.raises(ValueError, match=match):
+        calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=0, mask=mask)
