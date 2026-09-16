@@ -108,7 +108,9 @@ def calculate_niche(
         Each niche will be prefixed with the library identifier.
     %(table_key)s
     mask
-        Boolean array to filter cells which won't get assigned to a niche.
+        Boolean array to filter cells which won't get assigned to a niche. Only used by
+        `{fla.NEIGHBORHOOD.s!r}`; the other flavors documented it and never applied it, and passing
+        it with them raises. It is ``cluster_mask`` on :func:`calculate_niche_neighborhood`.
         Note that if you want to exclude these cells during neighborhood calculation already, you should subset your AnnData table before running 'sq.gr.spatial_neigbors'.
         Mask can look like the following. Here, the index values would correspond to adata.obs.index.
         The entries that are False are the ones ignored.
@@ -184,7 +186,11 @@ def calculate_niche(
     # cellcharter-only defaults stay guarded: filling them for other flavors would trip
     # the "not used for flavor" warning in _check_unnecessary_args
     if mask is not None and flavor != "neighborhood":
-        raise ValueError(f"'mask' is only used by the 'neighborhood' flavor, got flavor={flavor!r}")
+        raise ValueError(
+            f"'mask' is only used by the 'neighborhood' flavor, got flavor={flavor!r}. "
+            "It is 'cluster_mask' on `calculate_niche_neighborhood`, which is the only flavor "
+            "that takes one; the others never applied it."
+        )
 
     if flavor == "cellcharter":
         if aggregation is None:

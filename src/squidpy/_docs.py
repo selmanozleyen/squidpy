@@ -255,7 +255,8 @@ cluster_mask
         # the rest become 'not_a_niche'
 
     Subset the object and rebuild the graph with :func:`~squidpy.gr.spatial_neighbors` instead if
-    the masked observations should not be neighbors either. Only this flavor takes a mask."""
+    the masked observations should not be neighbors either. Only this flavor takes a mask; it is
+    ``mask`` on the deprecated :func:`~squidpy.gr.calculate_niche`."""
 _niche_min_niche_size = """\
 min_niche_size
     Minimum number of observations required for a niche. Niches with fewer observations
