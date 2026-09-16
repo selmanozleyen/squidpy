@@ -730,11 +730,11 @@ def test_mask_excludes_cells_from_the_clustering():
     keep = pd.Series(np.arange(120) < 80, index=adata.obs_names)
     _niche.LeidenClusterer.fit = spy
     try:
-        calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=0, mask=keep)
+        calculate_niche_neighborhood(adata, groups="ct", resolutions=1.0, n_neighbors=8, rng=0, cluster_mask=keep)
     finally:
         _niche.LeidenClusterer.fit = original
     assert spied == [80], f"the clusterer was fitted on {spied} observations, not the kept 80"
-    labels = adata.obs["utag_niche_res=1.0"].astype(str)
+    labels = adata.obs["nhood_niche_res=1.0"].astype(str)
     assert (labels[80:] == "not_a_niche").all()
     assert (labels[:80] != "not_a_niche").all()
 
@@ -744,8 +744,8 @@ def test_mask_accepts_a_partial_index():
     adata = _tiny(n=60)
     partial = Series([False, False, True], index=["0", "1", "2"])
     partial.index = adata.obs_names[:3]
-    calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=0, mask=partial)
-    labels = adata.obs["utag_niche_res=1.0"].astype(str)
+    calculate_niche_neighborhood(adata, groups="ct", resolutions=1.0, n_neighbors=8, rng=0, cluster_mask=partial)
+    labels = adata.obs["nhood_niche_res=1.0"].astype(str)
     assert (labels[:2] == "not_a_niche").all(), "the two False entries must be excluded"
     assert (labels[2:] != "not_a_niche").all(), "everything the mask omits is kept"
 
@@ -765,14 +765,28 @@ def test_mask_rejects_what_it_cannot_mean(index, match):
         else Series(np.zeros(40, dtype=bool), index=adata.obs_names)
     )
     with pytest.raises(ValueError, match=match):
-        calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=0, mask=mask)
+        calculate_niche_neighborhood(adata, groups="ct", resolutions=1.0, n_neighbors=8, rng=0, cluster_mask=mask)
 
 
-def test_spatialleiden_refuses_a_mask():
-    "It clusters the graphs, so an observation cannot be kept as a neighbor but dropped from the fit."
-    adata = _tiny(n=50)
-    sc.pp.pca(adata, n_comps=4)
-    sc.pp.neighbors(adata, n_neighbors=6, random_state=0)
-    keep = Series(np.arange(50) < 30, index=adata.obs_names)
-    with pytest.raises(ValueError, match=r"SpatialLeiden cannot do"):
-        calculate_niche_spatialleiden(adata, resolutions=0.5, rng=0, mask=keep)
+@pytest.mark.parametrize(
+    ("fn", "kwargs"),
+    [
+        pytest.param(calculate_niche_utag, {"resolutions": 0.5}, id="utag"),
+        pytest.param(calculate_niche_cellcharter, {"n_clusters": 2}, id="cellcharter"),
+        pytest.param(calculate_niche_spatialleiden, {"resolutions": 0.5}, id="spatialleiden"),
+    ],
+)
+def test_only_neighborhood_takes_a_mask(fn, kwargs):
+    "v1.8.3 documented `mask` for every flavor and implemented it for one; these never had it."
+    adata = _tiny(n=40)
+    keep = Series(np.arange(40) < 30, index=adata.obs_names)
+    with pytest.raises(TypeError, match=r"unexpected keyword argument 'mask'"):
+        fn(adata, rng=0, mask=keep, **kwargs)
+
+
+def test_the_umbrella_rejects_a_mask_outside_neighborhood():
+    "`calculate_niche` keeps the released spelling `mask`; it maps to `cluster_mask`."
+    adata = _tiny(n=40)
+    keep = Series(np.arange(40) < 30, index=adata.obs_names)
+    with pytest.warns(FutureWarning), pytest.raises(ValueError, match=r"only used by the 'neighborhood' flavor"):
+        calculate_niche(adata, flavor="utag", resolutions=1.0, n_neighbors=8, rng=0, mask=keep)

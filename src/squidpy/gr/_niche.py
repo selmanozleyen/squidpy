@@ -183,6 +183,9 @@ def calculate_niche(
 
     # cellcharter-only defaults stay guarded: filling them for other flavors would trip
     # the "not used for flavor" warning in _check_unnecessary_args
+    if mask is not None and flavor != "neighborhood":
+        raise ValueError(f"'mask' is only used by the 'neighborhood' flavor, got flavor={flavor!r}")
+
     if flavor == "cellcharter":
         if aggregation is None:
             aggregation = "mean"
@@ -232,7 +235,7 @@ def calculate_niche(
             n_hop_weights=n_hop_weights,
             embedding_key_added="niche_embedding",
             min_niche_size=min_niche_size,
-            mask=mask,
+            cluster_mask=mask,
             library_key=library_key,
             copy=not inplace,
             table_key=table_key,
@@ -249,7 +252,6 @@ def calculate_niche(
             spatial_connectivities_key=spatial_connectivities_key,
             embedding_key_added="niche_embedding",
             min_niche_size=min_niche_size,
-            mask=mask,
             library_key=library_key,
             copy=not inplace,
             table_key=table_key,
@@ -268,7 +270,6 @@ def calculate_niche(
             use_rep=use_rep,
             embedding_key_added="niche_embedding",
             min_niche_size=min_niche_size,
-            mask=mask,
             library_key=library_key,
             copy=not inplace,
             table_key=table_key,
@@ -285,7 +286,6 @@ def calculate_niche(
             use_weights=use_weights,
             rng=rng,
             min_niche_size=min_niche_size,
-            mask=mask,
             library_key=library_key,
             copy=not inplace,
             table_key=table_key,
@@ -308,7 +308,7 @@ def calculate_niche_neighborhood(
     n_hop_weights: list[float] | None = None,
     embedding_key_added: str = "niche_embedding",
     min_niche_size: int | None = None,
-    mask: pd.Series | None = None,
+    cluster_mask: pd.Series | None = None,
     library_key: str | None = None,
     copy: bool = False,
     table_key: str | None = None,
@@ -389,6 +389,7 @@ def calculate_niche_neighborhood(
         graph-hop distances. If provided, the weights determine the relative
         contribution of direct and higher-order neighbors to the final
         neighborhood profile. If not provided, equal weights are used.
+    %(niche_cluster_mask)s
     %(niche_common_params)s
     %(table_key)s
     %(niche_leiden_params)s
@@ -434,7 +435,7 @@ def calculate_niche_neighborhood(
         rng=rng,
         embedding_key_added=embedding_key_added,
         min_niche_size=min_niche_size,
-        mask=mask,
+        cluster_mask=cluster_mask,
         library_key=library_key,
         copy=copy,
         table_key=table_key,
@@ -451,7 +452,6 @@ def calculate_niche_utag(
     spatial_connectivities_key: str = "spatial_connectivities",
     embedding_key_added: str = "niche_embedding",
     min_niche_size: int | None = None,
-    mask: pd.Series | None = None,
     library_key: str | None = None,
     copy: bool = False,
     table_key: str | None = None,
@@ -546,7 +546,6 @@ def calculate_niche_utag(
         rng=rng,
         embedding_key_added=embedding_key_added,
         min_niche_size=min_niche_size,
-        mask=mask,
         library_key=library_key,
         copy=copy,
         table_key=table_key,
@@ -567,7 +566,6 @@ def calculate_niche_cellcharter(
     use_rep: str | None = None,
     embedding_key_added: str = "niche_embedding",
     min_niche_size: int | None = None,
-    mask: pd.Series | None = None,
     library_key: str | None = None,
     copy: bool = False,
     table_key: str | None = None,
@@ -676,7 +674,6 @@ def calculate_niche_cellcharter(
         rng=rng,
         embedding_key_added=embedding_key_added,
         min_niche_size=min_niche_size,
-        mask=mask,
         library_key=library_key,
         copy=copy,
         table_key=table_key,
@@ -695,7 +692,6 @@ def calculate_niche_spatialleiden(
     use_weights: bool | tuple[bool, bool] = True,
     rng: SeedLike | RNGLike | None = None,
     min_niche_size: int | None = None,
-    mask: pd.Series | None = None,
     library_key: str | None = None,
     copy: bool = False,
     table_key: str | None = None,
@@ -725,7 +721,6 @@ def calculate_niche_spatialleiden(
         Each resolution — and each library when stratifying by ``library_key`` — is
         clustered with an independent rng derived from it.
     %(niche_min_niche_size)s
-    %(niche_mask)s
     %(library_key)s
     %(copy)s
     %(table_key)s
@@ -746,13 +741,6 @@ def calculate_niche_spatialleiden(
 
     adata = orig_adata.copy() if copy else orig_adata
 
-    if mask is not None:
-        raise ValueError(
-            "'mask' keeps masked observations out of the niche fit, which SpatialLeiden cannot do: "
-            "it clusters the graphs themselves, so an observation either takes part or loses its "
-            "edges. Subset before 'spatial_neighbors' if the masked cells should not be neighbors."
-        )
-
     # normalise once here; everything below this point works with rngs only
     rng = np.random.default_rng(rng)
     resolution_list = _resolution_values(resolutions, pairs_ok=True)
@@ -764,7 +752,6 @@ def calculate_niche_spatialleiden(
         layer_ratio=layer_ratio,
         n_iterations=n_iterations,
         use_weights=use_weights,
-        mask=mask,
         min_niche_size=min_niche_size,
     )
 
@@ -821,7 +808,7 @@ def calculate_niche_custom(
     rng: SeedLike | RNGLike | None = None,
     embedding_key_added: str = "niche_embedding",
     min_niche_size: int | None = None,
-    mask: pd.Series | None = None,
+    cluster_mask: pd.Series | None = None,
     library_key: str | None = None,
     copy: bool = False,
     table_key: str | None = None,
@@ -894,7 +881,7 @@ def calculate_niche_custom(
             lib_embedding = embedder(lib_adata)
             lib_adata.obsm[embedding_key_added] = lib_embedding
             result_columns = _fit_clusterers(
-                lib_adata, lib_embedding, clusterers, rng, keep=_fitted_on(lib_adata, mask)
+                lib_adata, lib_embedding, clusterers, rng, keep=_fitted_on(lib_adata, cluster_mask)
             )
             _postprocess_niche_results(lib_adata, result_columns, min_niche_size, prefix=f"lib={lib_id}_")
 
@@ -911,7 +898,7 @@ def calculate_niche_custom(
     else:
         embedding = embedder(adata)
         adata.obsm[embedding_key_added] = embedding
-        result_columns = _fit_clusterers(adata, embedding, clusterers, rng, keep=_fitted_on(adata, mask))
+        result_columns = _fit_clusterers(adata, embedding, clusterers, rng, keep=_fitted_on(adata, cluster_mask))
         _postprocess_niche_results(adata, result_columns, min_niche_size)
 
     # For SpatialData, the column names shouldn't have = sign. Hence, run sanitize_table.
@@ -1303,17 +1290,17 @@ def _leiden_clusterers(
     }
 
 
-def _fitted_on(adata: AnnData, mask: pd.Series | None) -> NDArray[np.bool_] | None:
+def _fitted_on(adata: AnnData, mask: pd.Series | None, name: str = "cluster_mask") -> NDArray[np.bool_] | None:
     """Which observations the niche model is fitted on, aligned to ``adata.obs_names``."""
     if mask is None:
         return None
     if not mask.index.isin(adata.obs_names).any():
-        raise ValueError("'mask' shares no index value with 'adata.obs', so it masks nothing")
+        raise ValueError(f"{name!r} shares no index value with 'adata.obs', so it masks nothing")
     # observations the mask says nothing about are kept, which is how the documented example
     # of a three-entry mask is meant to read
     keep = mask.reindex(adata.obs_names, fill_value=True).to_numpy(dtype=bool)
     if not keep.any():
-        raise ValueError("'mask' excludes every observation, so no niche could be assigned")
+        raise ValueError(f"{name!r} excludes every observation, so no niche could be assigned")
     return keep
 
 
@@ -1384,7 +1371,6 @@ def _spatialleiden_once(
     layer_ratio: float,
     n_iterations: int,
     use_weights: bool | tuple[bool, bool],
-    mask: pd.Series | None,
     min_niche_size: int | None,
     prefix: str | None,
 ) -> list[str]:
