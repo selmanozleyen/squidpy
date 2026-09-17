@@ -909,13 +909,12 @@ def calculate_niche_custom(
     calculate_niche_spatialleiden : Convenience wrapper for spatialleiden flavor niche analysis.
     """
 
-    # up front: `obsm[None]` is accepted by AnnData and only fails later, at write_h5ad
+    # AnnData accepts `obsm[None]` and only fails at `write_h5ad`
     if not isinstance(embedding_key_added, str) or len(embedding_key_added) == 0:
         raise ValueError(f"'embedding_key_added' must be a non-empty string, got {embedding_key_added!r}")
 
     def run_one(adata: AnnData, rng: np.random.Generator, prefix: str | None) -> list[str]:
-        # the embedder is called from here, not through another helper: every frame in
-        # between shifts the stacklevel of the warnings it raises
+        # called here, not via a helper: another frame would shift the warnings' stacklevel
         embedding = embedder(adata)
         adata.obsm[embedding_key_added] = embedding
         columns = _fit_clusterers(adata, embedding, clusterers, rng, keep=_fitted_on(adata, cluster_mask))
@@ -923,8 +922,8 @@ def calculate_niche_custom(
         return columns
 
     if cluster_mask is not None and library_key is not None:
-        # every library is checked before the loop starts, because the loop writes each one into
-        # `adata` as it finishes and a raise part way through would leave those columns behind
+        # the loop writes each library into `adata` as it finishes, so a late raise would leave
+        # those columns behind
         adata = extract_adata_if_sdata(data, table_key=table_key)
         if library_key in adata.obs:
             for lib_id, names in adata.obs_names.to_series().groupby(adata.obs[library_key], observed=True):
@@ -1232,8 +1231,7 @@ def _utag_embedding(
     aggregated = nhood_aggregate(
         adata, layer=use_layer, use_rep=use_rep, connectivity_key=spatial_connectivities_key, hops=(1,)
     )
-    # a representation the caller passes is already reduced, and on a basis shared across
-    # libraries; the PCA here would put the aggregate back on a per-library one
+    # already reduced, and on one basis across libraries. This PCA would refit it per library.
     return to_dense(aggregated) if use_rep is not None else sc.pp.pca(aggregated)
 
 
@@ -1263,9 +1261,8 @@ def _nhop_pca_embedding(
             "ignores: the hop rings are boolean, as in CellCharter. Use the 'neighborhood' flavor "
             "if the weights should count.",
             UserWarning,
-            # `_stratify` and its `run_one` sit between the caller and the embedder, on top of
-            # the `functools.partial` hop. Still wrong through `calculate_niche`, which adds one
-            # more; no single number serves both entry points.
+            # `_stratify`, `run_one` and the `partial` sit in between. Still one short through
+            # `calculate_niche`.
             stacklevel=6,
         )
 
@@ -1368,8 +1365,7 @@ def _fitted_on(adata: AnnData, mask: pd.Series | None, name: str = "cluster_mask
         raise TypeError(f"{name!r} must be a boolean Series, got dtype '{mask.dtype}'")
     if not mask.index.isin(adata.obs_names).any():
         raise ValueError(f"{name!r} shares no index value with 'adata.obs', so it masks nothing")
-    # observations the mask says nothing about are kept, which is how the documented example
-    # of a three-entry mask is meant to read
+    # observations the mask omits are kept, as the documented three-entry example reads
     keep = mask.reindex(adata.obs_names, fill_value=True).to_numpy(dtype=bool)
     if not keep.any():
         raise ValueError(f"{name!r} excludes every observation, so no niche could be assigned")
@@ -1433,8 +1429,7 @@ def _warn_if_not_block_diagonal(adata: AnnData, library_key: str, graph_keys: Se
                 "new ones. Build the graph per library — `spatial_neighbors(..., library_key=...)` "
                 "does this, and takes any `obsm` through `spatial_key`.",
                 UserWarning,
-                # counted from the flavor the caller invoked; still one frame short through the
-                # deprecated `calculate_niche`, which adds one more
+                # counted from the flavor the caller invoked; one short through `calculate_niche`
                 stacklevel=stacklevel,
             )
 
@@ -1447,8 +1442,7 @@ def _stratify(
     table_key: str | None,
     copy: bool,
     graph_keys: Sequence[str],
-    # `stacklevel` for the warnings raised here, counted by the caller since the two call sites
-    # sit at different depths
+    # the two call sites sit at different depths, so the caller counts it
     stacklevel: int,
     run_one: Callable[[AnnData, np.random.Generator, str | None], list[str]],
 ) -> AnnData | None:

@@ -962,8 +962,7 @@ def _onehot(labels: pd.Series) -> csr_matrix:
     cat = labels.astype("category")
     codes = cat.cat.codes.to_numpy()
     keep = codes >= 0
-    # float64 so that `_aggregate_over` divides by the neighbor count at full precision; the
-    # entries are exactly 1.0, so the width costs nothing in accuracy, only in the profile
+    # the division in `_aggregate_over` needs float64. These entries are exactly 1.0 at any width.
     return csr_matrix(
         (np.ones(keep.sum(), dtype=np.float64), (np.flatnonzero(keep), codes[keep])),
         shape=(len(codes), len(cat.cat.categories)),
@@ -976,9 +975,8 @@ def _aggregate_over(
     """Aggregate *features* over the neighborhood each row of *adj* defines."""
     if aggregation == "sum":
         return adj @ features
-    # `normalize` rounds each weight to `adj.dtype`, which `spatial_neighbors` leaves at float32:
-    # 1/6 then arrives with a 1e-8 error that the clustering amplifies. The features decide, so a
-    # float32 expression matrix keeps a float32 adjacency and only a wider one pays for the cast.
+    # `normalize` rounds to `adj.dtype`, and `spatial_neighbors` leaves that float32, so 1/6 lands
+    # 1e-8 off. Only the wider side pays for the cast.
     dtype = np.promote_types(adj.dtype, getattr(features, "dtype", adj.dtype))
     normalized = normalize(adj if adj.dtype == dtype else adj.astype(dtype), norm="l1", axis=1)
     if aggregation == "mean":
