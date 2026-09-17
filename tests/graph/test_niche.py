@@ -741,6 +741,25 @@ def test_the_new_entry_points_validate_resolutions_too(dummy_adata2: AnnData):
         calculate_niche(dummy_adata2, flavor="utag", resolutions="high", n_neighbors=3, rng=0)
 
 
+@pytest.mark.parametrize(
+    ("fn", "kwargs", "column"),
+    [
+        pytest.param(calculate_niche_utag, {"resolutions": 1.0, "n_neighbors": 8}, "utag_niche_res=1.0", id="utag"),
+        pytest.param(
+            calculate_niche_cellcharter, {"n_clusters": 3, "distance": 2}, "cellcharter_niche", id="cellcharter"
+        ),
+    ],
+)
+def test_cluster_mask_reaches_the_other_flavors(fn, kwargs, column):
+    "v1.8.3 documented a mask for every flavor and applied it to one; these now honour it."
+    adata = _tiny(n=80)
+    keep = Series(np.arange(80) < 60, index=adata.obs_names)
+    fn(adata, rng=0, cluster_mask=keep, **kwargs)
+    labels = adata.obs[column].astype(str)
+    assert (labels[60:] == "not_a_niche").all()
+    assert (labels[:60] != "not_a_niche").all()
+
+
 def test_mask_excludes_cells_from_the_clustering():
     "Masked cells used to be clustered and then relabelled, so they still shaped the niches."
     adata = _tiny(n=120)
@@ -792,25 +811,17 @@ def test_mask_rejects_what_it_cannot_mean(index, match):
         calculate_niche_neighborhood(adata, groups="ct", resolutions=1.0, n_neighbors=8, rng=0, cluster_mask=mask)
 
 
-@pytest.mark.parametrize(
-    ("fn", "kwargs"),
-    [
-        pytest.param(calculate_niche_utag, {"resolutions": 0.5}, id="utag"),
-        pytest.param(calculate_niche_cellcharter, {"n_clusters": 2}, id="cellcharter"),
-        pytest.param(calculate_niche_spatialleiden, {"resolutions": 0.5}, id="spatialleiden"),
-    ],
-)
-def test_only_neighborhood_takes_a_mask(fn, kwargs):
-    "v1.8.3 documented `mask` for every flavor and implemented it for one; these never had it."
+def test_spatialleiden_refuses_a_cluster_mask():
+    "It clusters the graphs, so an observation cannot be kept as a neighbor but dropped from the fit."
     adata = _tiny(n=40)
     keep = Series(np.arange(40) < 30, index=adata.obs_names)
-    with pytest.raises(TypeError, match=r"unexpected keyword argument 'mask'"):
-        fn(adata, rng=0, mask=keep, **kwargs)
+    with pytest.raises(TypeError, match=r"unexpected keyword argument 'cluster_mask'"):
+        calculate_niche_spatialleiden(adata, resolutions=0.5, rng=0, cluster_mask=keep)
 
 
-def test_the_umbrella_rejects_a_mask_outside_neighborhood():
+def test_the_umbrella_refuses_a_mask_for_spatialleiden():
     "`calculate_niche` keeps the released spelling `mask`; it maps to `cluster_mask`."
     adata = _tiny(n=40)
     keep = Series(np.arange(40) < 30, index=adata.obs_names)
-    with pytest.warns(FutureWarning), pytest.raises(ValueError, match=r"only used by the 'neighborhood' flavor"):
-        calculate_niche(adata, flavor="utag", resolutions=1.0, n_neighbors=8, rng=0, mask=keep)
+    with pytest.warns(FutureWarning), pytest.raises(ValueError, match=r"'spatialleiden' cannot"):
+        calculate_niche(adata, flavor="spatialleiden", resolutions=0.5, rng=0, mask=keep)
