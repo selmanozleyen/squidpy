@@ -731,6 +731,22 @@ def test_hop_rings_do_not_depend_on_the_thread_count(n_jobs: int):
 # ---------------------------------------------------------------- cellcharter numerics
 
 
+def test_composition_profile_rows_sum_exactly():
+    "`spatial_neighbors` leaves obsp float32, and a float32 1/k puts a 1e-8 error in every row."
+    adata = _tiny(n=200)
+    profile = nhood_aggregate(adata, groups="ct", connectivity_key="spatial_connectivities")
+    assert profile.dtype == np.float64, "a float32 adjacency must not set the profile's precision"
+    # every row is a distribution over the categories, so each sums to one and the total is n_obs
+    np.testing.assert_array_almost_equal(to_dense(profile).sum(axis=1), 1.0, decimal=15)
+
+
+def test_a_feature_matrix_keeps_its_own_precision():
+    "Only the wider side pays for the cast, so a float32 expression matrix aggregates in float32."
+    adata = _tiny(n=60)
+    assert adata.X.dtype == np.float32
+    assert nhood_aggregate(adata, connectivity_key="spatial_connectivities").dtype == np.float32
+
+
 def test_aggregate_over_variance_matches_the_definition():
     "E[x^2] - E[x]^2 over each neighborhood; a sign slip here is invisible to the flavor tests."
     adjacency = csr_matrix(np.array([[0, 1, 1], [1, 0, 0], [1, 1, 0]], dtype=float))

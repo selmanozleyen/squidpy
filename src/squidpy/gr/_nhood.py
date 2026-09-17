@@ -959,11 +959,14 @@ def _power_adjacencies(adj: CSBase, max_hop: int) -> list[CSBase]:
 
 def _onehot(labels: pd.Series) -> csr_matrix:
     """Indicator matrix of ``labels``, one column per category."""
-    codes = labels.astype("category").cat.codes.to_numpy()
+    cat = labels.astype("category")
+    codes = cat.cat.codes.to_numpy()
     keep = codes >= 0
+    # float64 so that `_aggregate_over` divides by the neighbor count at full precision; the
+    # entries are exactly 1.0, so the width costs nothing in accuracy, only in the profile
     return csr_matrix(
-        (np.ones(keep.sum(), dtype=np.float32), (np.flatnonzero(keep), codes[keep])),
-        shape=(len(codes), len(labels.astype("category").cat.categories)),
+        (np.ones(keep.sum(), dtype=np.float64), (np.flatnonzero(keep), codes[keep])),
+        shape=(len(codes), len(cat.cat.categories)),
     )
 
 
@@ -973,7 +976,11 @@ def _aggregate_over(
     """Aggregate *features* over the neighborhood each row of *adj* defines."""
     if aggregation == "sum":
         return adj @ features
-    normalized = normalize(adj, norm="l1", axis=1)
+    # `normalize` rounds each weight to `adj.dtype`, which `spatial_neighbors` leaves at float32:
+    # 1/6 then arrives with a 1e-8 error that the clustering amplifies. The features decide, so a
+    # float32 expression matrix keeps a float32 adjacency and only a wider one pays for the cast.
+    dtype = np.promote_types(adj.dtype, getattr(features, "dtype", adj.dtype))
+    normalized = normalize(adj if adj.dtype == dtype else adj.astype(dtype), norm="l1", axis=1)
     if aggregation == "mean":
         return normalized @ features
     if aggregation == "variance":
@@ -1043,7 +1050,7 @@ def nhood_aggregate(
     by_hop: dict[int, CSBase | None] = {0: None}
     if max(hops) >= 1:
         by_hop |= dict(enumerate(_power_adjacencies(adata.obsp[connectivity_key], max(hops)), start=1))
-    if has_value is not None:
+    if has_value is not None and not has_value.all():
         keep = diags(has_value.astype(features.dtype))
         by_hop = {hop: adj if adj is None else (adj @ keep).tocsr() for hop, adj in by_hop.items()}
     # hop 0 is the observation itself, so it contributes its features unaggregated
