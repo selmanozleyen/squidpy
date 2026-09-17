@@ -770,68 +770,23 @@ def calculate_niche_spatialleiden(
     each library and the results are merged back into the parent object.
     """
 
-    # obtain adata if data was of sdata type
-    orig_adata = extract_adata_if_sdata(data, table_key=table_key)
-
-    adata = orig_adata.copy() if copy else orig_adata
-
-    # normalise once here; everything below this point works with rngs only
-    rng = np.random.default_rng(rng)
     resolution_list = _resolution_values(resolutions, pairs_ok=True)
-    run = partial(
-        _spatialleiden_once,
-        resolution_list=resolution_list,
-        latent_connectivities_key=latent_connectivities_key,
-        spatial_connectivities_key=spatial_connectivities_key,
-        layer_ratio=layer_ratio,
-        n_iterations=n_iterations,
-        use_weights=use_weights,
-        min_niche_size=min_niche_size,
-    )
 
-    if library_key is not None:
-        assert_key_in_adata(adata, library_key, attr="obs")
-        logg.info(f"Stratifying by library_key '{library_key}'")
+    def run_one(adata: AnnData, rng: np.random.Generator, prefix: str | None) -> list[str]:
+        return _spatialleiden_once(
+            adata,
+            resolution_list=resolution_list,
+            rng=rng,
+            latent_connectivities_key=latent_connectivities_key,
+            spatial_connectivities_key=spatial_connectivities_key,
+            layer_ratio=layer_ratio,
+            n_iterations=n_iterations,
+            use_weights=use_weights,
+            min_niche_size=min_niche_size,
+            prefix=prefix,
+        )
 
-        # each library is an independent clustering problem, so it gets its own rng
-        # (indexed by `itr` so that skipped empty libraries don't shift the others)
-        library_ids = adata.obs[library_key].unique()
-        library_rngs = rng.spawn(len(library_ids))
-
-        added_columns: list[str] = []
-        seeded: set[str] = set()
-
-        # go through each library_id and process the corresponding adata subset
-        for itr, lib_id in enumerate(library_ids):
-            logg.info(f"Processing library '{lib_id}'")
-
-            lib_indices = adata.obs[adata.obs[library_key] == lib_id].index
-
-            if len(lib_indices) == 0:
-                logg.warning(f"Library '{lib_id}' contains no cells, skipping")
-                continue
-
-            lib_adata = adata[lib_indices].copy()
-            result_columns = run(lib_adata, rng=library_rngs[itr], prefix=f"lib={lib_id}_")
-            _merge_library_columns(adata, lib_adata, lib_indices, result_columns, seeded)
-            added_columns = result_columns
-
-        if len(library_ids) > 0 and len(added_columns) == 0:
-            raise ValueError(f"no observation has a '{library_key}', so no niche could be assigned")
-
-        # the per-library labels go in as strings, so cast once every library has been seen
-        for col in added_columns:
-            adata.obs[col] = adata.obs[col].astype("category")
-
-    else:
-        run(adata, rng=rng, prefix=None)
-
-    # For SpatialData, the column names shouldn't have = sign. Hence, run sanitize_table.
-    # TODO: In future, change the naming standard of any niche columns added to not have '=' to be compatible with spatialdata naming
-    if isinstance(data, SpatialData):
-        sanitize_table(adata)
-
-    return adata if copy else None
+    return _stratify(data, library_key=library_key, rng=rng, table_key=table_key, copy=copy, run_one=run_one)
 
 
 @d.dedent
@@ -882,65 +837,20 @@ def calculate_niche_custom(
     calculate_niche_spatialleiden : Convenience wrapper for spatialleiden flavor niche analysis.
     """
 
-    # obtain adata if data was of sdata type
-    orig_adata = extract_adata_if_sdata(data, table_key=table_key)
-
-    adata = orig_adata.copy() if copy else orig_adata
-
+    # up front: `obsm[None]` is accepted by AnnData and only fails later, at write_h5ad
     if not isinstance(embedding_key_added, str) or len(embedding_key_added) == 0:
         raise ValueError(f"'embedding_key_added' must be a non-empty string, got {embedding_key_added!r}")
 
-    rng = np.random.default_rng(rng)
-
-    if library_key is not None:
-        assert_key_in_adata(adata, library_key, attr="obs")
-        logg.info(f"Stratifying by library_key '{library_key}'")
-
-        added_columns: list[str] = []
-        seeded: set[str] = set()
-        library_ids = adata.obs[library_key].unique()
-
-        # go through each library_id and process the corresponding adata subset
-        for lib_id in library_ids:
-            logg.info(f"Processing library '{lib_id}'")
-
-            lib_indices = adata.obs[adata.obs[library_key] == lib_id].index
-
-            if len(lib_indices) == 0:
-                logg.warning(f"Library '{lib_id}' contains no cells, skipping")
-                continue
-
-            lib_adata = adata[lib_indices].copy()
-
-            lib_embedding = embedder(lib_adata)
-            lib_adata.obsm[embedding_key_added] = lib_embedding
-            result_columns = _fit_clusterers(
-                lib_adata, lib_embedding, clusterers, rng, keep=_fitted_on(lib_adata, cluster_mask)
-            )
-            _postprocess_niche_results(lib_adata, result_columns, min_niche_size, prefix=f"lib={lib_id}_")
-
-            _merge_library_columns(adata, lib_adata, lib_indices, result_columns, seeded)
-            added_columns = result_columns
-
-        if len(library_ids) > 0 and len(added_columns) == 0:
-            raise ValueError(f"no observation has a '{library_key}', so no niche could be assigned")
-
-        # the per-library labels go in as strings, so cast once every library has been seen
-        for col in added_columns:
-            adata.obs[col] = adata.obs[col].astype("category")
-
-    else:
+    def run_one(adata: AnnData, rng: np.random.Generator, prefix: str | None) -> list[str]:
+        # the embedder is called from here, not through another helper: every frame in
+        # between shifts the stacklevel of the warnings it raises
         embedding = embedder(adata)
         adata.obsm[embedding_key_added] = embedding
-        result_columns = _fit_clusterers(adata, embedding, clusterers, rng, keep=_fitted_on(adata, cluster_mask))
-        _postprocess_niche_results(adata, result_columns, min_niche_size)
+        columns = _fit_clusterers(adata, embedding, clusterers, rng, keep=_fitted_on(adata, cluster_mask))
+        _postprocess_niche_results(adata, columns, min_niche_size, prefix)
+        return columns
 
-    # For SpatialData, the column names shouldn't have = sign. Hence, run sanitize_table.
-    # TODO: In future, change the naming standard of any niche columns added to not have '=' to be compatible with spatialdata naming
-    if isinstance(data, SpatialData):
-        sanitize_table(adata)
-
-    return adata if copy else None
+    return _stratify(data, library_key=library_key, rng=rng, table_key=table_key, copy=copy, run_one=run_one)
 
 
 def _validate_niche_args(
@@ -1259,8 +1169,10 @@ def _nhop_pca_embedding(
             "ignores: the hop rings are boolean, as in CellCharter. Use the 'neighborhood' flavor "
             "if the weights should count.",
             UserWarning,
-            # the embedder is reached through `functools.partial`, so 3 lands in this module
-            stacklevel=4,
+            # `_stratify` and its `run_one` sit between the caller and the embedder, on top of
+            # the `functools.partial` hop. Still wrong through `calculate_niche`, which adds one
+            # more; no single number serves both entry points.
+            stacklevel=6,
         )
 
     # CellCharter aggregates an already reduced representation, so PCA comes first: the rings then
@@ -1377,6 +1289,60 @@ def _fit_clusterers(
 ############
 ### postprocessing
 ############
+
+
+def _stratify(
+    data: AnnData | SpatialData,
+    *,
+    library_key: str | None,
+    rng: SeedLike | RNGLike | None,
+    table_key: str | None,
+    copy: bool,
+    run_one: Callable[[AnnData, np.random.Generator, str | None], list[str]],
+) -> AnnData | None:
+    orig_adata = extract_adata_if_sdata(data, table_key=table_key)
+    adata = orig_adata.copy() if copy else orig_adata
+    rng = np.random.default_rng(rng)
+
+    if library_key is not None:
+        assert_key_in_adata(adata, library_key, attr="obs")
+        logg.info(f"Stratifying by library_key '{library_key}'")
+
+        # each library is an independent clustering problem, so it gets its own rng
+        # (indexed by `itr` so that skipped empty libraries don't shift the others)
+        library_ids = adata.obs[library_key].unique()
+        library_rngs = rng.spawn(len(library_ids))
+
+        added_columns: list[str] = []
+        seeded: set[str] = set()
+
+        for itr, lib_id in enumerate(library_ids):
+            logg.info(f"Processing library '{lib_id}'")
+            lib_indices = adata.obs[adata.obs[library_key] == lib_id].index
+            if len(lib_indices) == 0:
+                logg.warning(f"Library '{lib_id}' contains no cells, skipping")
+                continue
+
+            lib_adata = adata[lib_indices].copy()
+            result_columns = run_one(lib_adata, library_rngs[itr], f"lib={lib_id}_")
+            _merge_library_columns(adata, lib_adata, lib_indices, result_columns, seeded)
+            added_columns = result_columns
+
+        if len(library_ids) > 0 and len(added_columns) == 0:
+            raise ValueError(f"no observation has a '{library_key}', so no niche could be assigned")
+
+        # the per-library labels go in as strings, so cast once every library has been seen
+        for col in added_columns:
+            adata.obs[col] = adata.obs[col].astype("category")
+    else:
+        run_one(adata, rng, None)
+
+    # For SpatialData, the column names shouldn't have = sign. Hence, run sanitize_table.
+    # TODO: In future, change the naming standard of any niche columns added to not have '=' to be compatible with spatialdata naming
+    if isinstance(data, SpatialData):
+        sanitize_table(adata)
+
+    return adata if copy else None
 
 
 def _merge_library_columns(
