@@ -13,6 +13,7 @@ from anndata import AnnData
 from fast_array_utils.conv import to_dense
 from fast_array_utils.types import HasArrayNamespace as Array
 from numpy.typing import NDArray
+from pandas.api.types import is_bool_dtype
 from sklearn.base import clone
 from sklearn.mixture import GaussianMixture
 from spatialdata import SpatialData, sanitize_table
@@ -103,14 +104,14 @@ def calculate_niche(
             - `{fla.UTAG.s!r}` - use utag algorithm (matrix multiplication).
             - `{fla.SPATIALLEIDEN.s!r}` - cluster spatially resolved omics data using Multiplex Leiden.
             - `{fla.CELLCHARTER.s!r}` - a simplified version of CellCharter's approach, using PCA for dimensionality reduction. An arbitrary embedding can be used instead of PCA by setting the `use_rep` parameter which will try to find the embedding in `adata.obsm`.
-    %(library_key)s
-        If provided, niches will be calculated separately for each unique value in this column.
-        Each niche will be prefixed with the library identifier.
+    %(niche_library_key)s
     %(table_key)s
     mask
-        Boolean array to filter cells which won't get assigned to a niche. Only used by
-        `{fla.NEIGHBORHOOD.s!r}`; the other flavors documented it and never applied it, and passing
-        it with them raises. It is ``cluster_mask`` on :func:`calculate_niche_neighborhood`.
+        Boolean array to filter cells which won't get assigned to a niche. Applied by the three
+        flavors that build an embedding, where it is spelled ``cluster_mask`` — see
+        :func:`calculate_niche_neighborhood`. `{fla.SPATIALLEIDEN.s!r}` cannot honour one and
+        raises; before this it was documented for all four and applied by
+        `{fla.NEIGHBORHOOD.s!r}` alone.
         Note that if you want to exclude these cells during neighborhood calculation already, you should subset your AnnData table before running 'sq.gr.spatial_neigbors'.
         Mask can look like the following. Here, the index values would correspond to adata.obs.index.
         The entries that are False are the ones ignored.
@@ -406,8 +407,9 @@ def calculate_niche_neighborhood(
         their categories reach the kept profiles. Observations the mask omits are kept. In effect
         ``clusterer.fit_predict(profile[cluster_mask])``. Subset and rebuild the graph with
         :func:`~squidpy.gr.spatial_neighbors` instead if they should not be neighbors either.
-        Called ``mask`` on the deprecated :func:`calculate_niche`, the only other flavor to take
-        one.
+        Called ``mask`` on the deprecated :func:`calculate_niche`. :func:`calculate_niche_utag`
+        and :func:`calculate_niche_cellcharter` take the same argument;
+        :func:`calculate_niche_spatialleiden` cannot honour one.
     key_added
         Stem of the :attr:`anndata.AnnData.obs` columns the labels are written to. One column per
         resolution, named ``f"{{key_added}}_res={{resolution}}"``, so a second call with a
@@ -569,10 +571,10 @@ def calculate_niche_utag(
 
     Returns
     -------
-    If ``copy=True``, returns a copy of ``adata`` with the PCA of the spatially
-    aggregated features in ``.obsm[embedding_key_added]`` and niche assignments
-    added to ``.obs``. Otherwise, modifies ``adata`` in place and returns
-    ``None``.
+    If ``copy=True``, returns a copy of ``adata`` with the spatially aggregated features in
+    ``.obsm[embedding_key_added]`` — reduced by PCA, unless ``use_rep`` supplied them already
+    reduced — and niche assignments added to ``.obs``. Otherwise, modifies ``adata`` in place and
+    returns ``None``.
 
     """
 
@@ -814,7 +816,7 @@ def calculate_niche_spatialleiden(
         different stem does not overwrite the first. A stem rather than an exact name because one
         call writes one column per resolution, the same reason
         :func:`~squidpy.gr.spatial_neighbors` and :func:`scanpy.pp.neighbors` treat theirs as one.
-    %(library_key)s
+    %(niche_library_key)s
     %(copy)s
     %(table_key)s
 
@@ -853,6 +855,7 @@ def calculate_niche_spatialleiden(
         table_key=table_key,
         copy=copy,
         graph_keys=(latent_connectivities_key, spatial_connectivities_key),
+        stacklevel=4,
         run_one=run_one,
     )
 
@@ -919,6 +922,17 @@ def calculate_niche_custom(
         _postprocess_niche_results(adata, columns, min_niche_size, prefix)
         return columns
 
+    if cluster_mask is not None and library_key is not None:
+        # every library is checked before the loop starts, because the loop writes each one into
+        # `adata` as it finishes and a raise part way through would leave those columns behind
+        adata = extract_adata_if_sdata(data, table_key=table_key)
+        if library_key in adata.obs:
+            for lib_id, names in adata.obs_names.to_series().groupby(adata.obs[library_key], observed=True):
+                try:
+                    _fitted_on(adata[list(names)], cluster_mask)
+                except ValueError as exc:
+                    raise ValueError(f"in library {lib_id!r}: {exc}") from None
+
     return _stratify(
         data,
         library_key=library_key,
@@ -926,6 +940,7 @@ def calculate_niche_custom(
         table_key=table_key,
         copy=copy,
         graph_keys=graph_keys,
+        stacklevel=5,
         run_one=run_one,
     )
 
@@ -1349,6 +1364,8 @@ def _fitted_on(adata: AnnData, mask: pd.Series | None, name: str = "cluster_mask
     """Which observations the niche model is fitted on, aligned to ``adata.obs_names``."""
     if mask is None:
         return None
+    if not is_bool_dtype(mask):
+        raise TypeError(f"{name!r} must be a boolean Series, got dtype '{mask.dtype}'")
     if not mask.index.isin(adata.obs_names).any():
         raise ValueError(f"{name!r} shares no index value with 'adata.obs', so it masks nothing")
     # observations the mask says nothing about are kept, which is how the documented example
@@ -1400,7 +1417,7 @@ def _fit_clusterers(
 ############
 
 
-def _warn_if_not_block_diagonal(adata: AnnData, library_key: str, graph_keys: Sequence[str]) -> None:
+def _warn_if_not_block_diagonal(adata: AnnData, library_key: str, graph_keys: Sequence[str], stacklevel: int) -> None:
     """Slicing per library only preserves a graph that has no edges across libraries."""
     libraries = np.asarray(adata.obs[library_key])
     for key in graph_keys:
@@ -1416,8 +1433,9 @@ def _warn_if_not_block_diagonal(adata: AnnData, library_key: str, graph_keys: Se
                 "new ones. Build the graph per library — `spatial_neighbors(..., library_key=...)` "
                 "does this, and takes any `obsm` through `spatial_key`.",
                 UserWarning,
-                # reached through `_stratify` from the flavor the caller invoked
-                stacklevel=4,
+                # counted from the flavor the caller invoked; still one frame short through the
+                # deprecated `calculate_niche`, which adds one more
+                stacklevel=stacklevel,
             )
 
 
@@ -1429,6 +1447,9 @@ def _stratify(
     table_key: str | None,
     copy: bool,
     graph_keys: Sequence[str],
+    # `stacklevel` for the warnings raised here, counted by the caller since the two call sites
+    # sit at different depths
+    stacklevel: int,
     run_one: Callable[[AnnData, np.random.Generator, str | None], list[str]],
 ) -> AnnData | None:
     orig_adata = extract_adata_if_sdata(data, table_key=table_key)
@@ -1437,7 +1458,7 @@ def _stratify(
 
     if library_key is not None:
         assert_key_in_adata(adata, library_key, attr="obs")
-        _warn_if_not_block_diagonal(adata, library_key, graph_keys)
+        _warn_if_not_block_diagonal(adata, library_key, graph_keys, stacklevel)
         logg.info(f"Stratifying by library_key '{library_key}'")
 
         # each library is an independent clustering problem, so it gets its own rng

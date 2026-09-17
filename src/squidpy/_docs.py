@@ -245,11 +245,17 @@ _niche_min_niche_size = """\
 min_niche_size
     Minimum number of observations required for a niche. Niches with fewer observations
     are relabeled ``'not_a_niche'``."""
+_niche_library_key = """\
+library_key
+    Key in :attr:`anndata.AnnData.obs` grouping the observations into libraries. Each library is
+    clustered on its own, over its own slice of the graphs — which is the same as a graph built
+    per library only if the graphs have no edges between libraries, so a graph that does is
+    warned about. :func:`~squidpy.gr.spatial_neighbors` builds one per library."""
 # the postprocessing + output params every user-facing niche function shares, in signature order
 _niche_common_params = f"""\
 {_niche_embedding_key_added}
 {_niche_min_niche_size}
-{_library_key}
+{_niche_library_key}
 {_copy}"""
 _niche_leiden_params = f"""\
 flavor
@@ -512,6 +518,7 @@ d = DocstringProcessor(
     groups=_groups,
     plotting_library_id=_plotting_library_id,
     library_key=_library_key,
+    niche_library_key=_niche_library_key,
     niche_spatial_conn_key=_niche_spatial_conn_key,
     niche_embedding_key_added=_niche_embedding_key_added,
     niche_min_niche_size=_niche_min_niche_size,

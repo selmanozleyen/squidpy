@@ -501,6 +501,48 @@ def test_library_key_embeds_each_library_on_its_own(monkeypatch):
     assert seen == [half, half], f"embedder was handed {seen} observations"
 
 
+@pytest.mark.parametrize(
+    ("flavor", "kwargs"),
+    [
+        ("neighborhood", {"groups": "ct", "resolutions": 1.0}),
+        ("utag", {"resolutions": 1.0}),
+        ("cellcharter", {"distance": 1, "n_clusters": 3}),
+        ("spatialleiden", {"resolutions": 1.0, "latent_connectivities_key": "spatial_connectivities"}),
+    ],
+)
+def test_cross_library_warning_points_at_the_caller(flavor, kwargs):
+    "The two entry points sit at different depths, so each passes its own stacklevel."
+    adata = _two_sections((40, 40))
+    adata.obsm["spatial"] = np.random.default_rng(1).random((80, 2)) * 10
+    del adata.obsp["spatial_connectivities"], adata.obsp["spatial_distances"]
+    spatial_neighbors_knn(adata, n_neighs=4)
+    fn = globals()[f"calculate_niche_{flavor}"]
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fn(adata, rng=0, library_key="section", **kwargs)
+    crossing = [w for w in caught if "between libraries" in str(w.message)]
+    assert crossing, "no cross-library warning was raised"
+    assert crossing[0].filename == __file__, f"points at {crossing[0].filename}, not the caller"
+
+
+def test_mask_emptying_one_library_writes_nothing():
+    "The loop merges each library as it finishes, so it must not start and then raise."
+    adata = _two_sections((40, 40))
+    mask = Series(~(adata.obs["section"] == "s2").to_numpy(), index=adata.obs_names)
+    with pytest.raises(ValueError, match=r"in library 's2': 'cluster_mask' excludes every observation"):
+        calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=0, library_key="section", cluster_mask=mask)
+    assert not [c for c in adata.obs.columns if "utag" in c], "a partial result was left behind"
+
+
+def test_non_boolean_mask_raises():
+    "`to_numpy(dtype=bool)` reads every non-empty string as True, so this must not pass silently."
+    adata = _tiny(n=60)
+    strings = Series(["False"] * 20 + ["True"] * 40, index=adata.obs_names)
+    with pytest.raises(TypeError, match=r"'cluster_mask' must be a boolean Series, got dtype"):
+        calculate_niche_utag(adata, resolutions=1.0, rng=0, cluster_mask=strings)
+
+
 def test_cross_library_edges_warn():
     "Stratifying drops those edges rather than rewiring, so the kept cells lose neighbors."
     base = _two_sections((40, 40))
