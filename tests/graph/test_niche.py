@@ -801,3 +801,38 @@ def test_the_umbrella_refuses_a_mask_for_spatialleiden():
     keep = Series(np.arange(40) < 30, index=adata.obs_names)
     with pytest.warns(FutureWarning), pytest.raises(ValueError, match=r"'spatialleiden' cannot"):
         calculate_niche(adata, flavor="spatialleiden", resolutions=0.5, rng=0, mask=keep)
+
+
+@pytest.mark.parametrize(
+    ("fn", "kwargs", "expected"),
+    [
+        pytest.param(
+            calculate_niche_neighborhood,
+            {"groups": "ct", "resolutions": [0.5, 1.0], "n_neighbors": 8},
+            ["mine_res=0.5", "mine_res=1.0"],
+            id="neighborhood",
+        ),
+        pytest.param(calculate_niche_utag, {"resolutions": 1.0, "n_neighbors": 8}, ["mine_res=1.0"], id="utag"),
+        pytest.param(calculate_niche_cellcharter, {"n_clusters": 3, "distance": 2}, ["mine"], id="cellcharter"),
+    ],
+)
+def test_key_added_names_the_columns(fn, kwargs, expected):
+    "A stem for the flavors that write one column per resolution, exact for the one that writes one."
+    adata = _tiny(n=60)
+    fn(adata, rng=0, key_added="mine", **kwargs)
+    assert [c for c in adata.obs.columns if c.startswith("mine")] == expected
+
+
+def test_key_added_lets_two_runs_coexist():
+    "Without it the second call silently overwrote the first."
+    adata = _tiny(n=60)
+    calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=0, key_added="runA")
+    calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=1, key_added="runB")
+    assert "runA_res=1.0" in adata.obs.columns
+    assert "runB_res=1.0" in adata.obs.columns
+
+
+def test_key_added_defaults_reproduce_the_derived_names():
+    adata = _tiny(n=60)
+    calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=0)
+    assert "utag_niche_res=1.0" in adata.obs.columns
