@@ -241,22 +241,6 @@ _niche_embedding_key_added = """\
 embedding_key_added
     Controls the name of the key to be added in :attr:`anndata.AnnData.obsm`, which will hold
     the niche embedding computed."""
-_niche_cluster_mask = """\
-cluster_mask
-    Boolean :class:`pandas.Series` indexed like :attr:`anndata.AnnData.obs`. Observations that
-    are `False` are labeled ``'not_a_niche'`` and take no part in the clustering, so they do not
-    shape the niches of the observations that are kept. They still count as spatial neighbors,
-    so their categories reach the kept observations' profiles. Observations the mask leaves out
-    are kept. Equivalent to::
-
-        profile = nhood_aggregate(adata, groups=groups, hops=range(1, distance + 1))
-        profile = sc.pp.scale(to_dense(profile), zero_center=True)
-        labels = clusterer.fit_predict(profile[cluster_mask])   # the kept rows only
-        # the rest become 'not_a_niche'
-
-    Subset the object and rebuild the graph with :func:`~squidpy.gr.spatial_neighbors` instead if
-    the masked observations should not be neighbors either. Only this flavor takes a mask; it is
-    ``mask`` on the deprecated :func:`~squidpy.gr.calculate_niche`."""
 _niche_min_niche_size = """\
 min_niche_size
     Minimum number of observations required for a niche. Niches with fewer observations
@@ -530,7 +514,6 @@ d = DocstringProcessor(
     library_key=_library_key,
     niche_spatial_conn_key=_niche_spatial_conn_key,
     niche_embedding_key_added=_niche_embedding_key_added,
-    niche_cluster_mask=_niche_cluster_mask,
     niche_min_niche_size=_niche_min_niche_size,
     niche_common_params=_niche_common_params,
     niche_leiden_params=_niche_leiden_params,

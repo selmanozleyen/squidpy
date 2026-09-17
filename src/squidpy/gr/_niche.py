@@ -185,11 +185,11 @@ def calculate_niche(
 
     # cellcharter-only defaults stay guarded: filling them for other flavors would trip
     # the "not used for flavor" warning in _check_unnecessary_args
-    if mask is not None and flavor != "neighborhood":
+    if mask is not None and flavor == "spatialleiden":
         raise ValueError(
-            f"'mask' is only used by the 'neighborhood' flavor, got flavor={flavor!r}. "
-            "It is 'cluster_mask' on `calculate_niche_neighborhood`, which is the only flavor "
-            "that takes one; the others never applied it."
+            "'mask' keeps masked observations out of the niche fit, which 'spatialleiden' cannot "
+            "do: it clusters the graphs themselves, so an observation either takes part or loses "
+            "its edges. It is 'cluster_mask' on the other three flavors."
         )
 
     if flavor == "cellcharter":
@@ -257,6 +257,7 @@ def calculate_niche(
             use_layer=None,
             spatial_connectivities_key=spatial_connectivities_key,
             embedding_key_added="niche_embedding",
+            cluster_mask=mask,
             min_niche_size=min_niche_size,
             library_key=library_key,
             copy=not inplace,
@@ -275,6 +276,7 @@ def calculate_niche(
             n_clusters=n_components,
             use_rep=use_rep,
             embedding_key_added="niche_embedding",
+            cluster_mask=mask,
             min_niche_size=min_niche_size,
             library_key=library_key,
             copy=not inplace,
@@ -395,7 +397,15 @@ def calculate_niche_neighborhood(
         graph-hop distances. If provided, the weights determine the relative
         contribution of direct and higher-order neighbors to the final
         neighborhood profile. If not provided, equal weights are used.
-    %(niche_cluster_mask)s
+    cluster_mask
+        Boolean :class:`pandas.Series` indexed like :attr:`anndata.AnnData.obs`. ``False``
+        observations are labeled ``'not_a_niche'`` and take no part in the clustering, so they do
+        not shape the niches of the ones kept — they do still count as spatial neighbors, so
+        their categories reach the kept profiles. Observations the mask omits are kept. In effect
+        ``clusterer.fit_predict(profile[cluster_mask])``. Subset and rebuild the graph with
+        :func:`~squidpy.gr.spatial_neighbors` instead if they should not be neighbors either.
+        Called ``mask`` on the deprecated :func:`calculate_niche`, the only other flavor to take
+        one.
     %(niche_common_params)s
     %(table_key)s
     %(niche_leiden_params)s
@@ -458,6 +468,7 @@ def calculate_niche_utag(
     spatial_connectivities_key: str = "spatial_connectivities",
     embedding_key_added: str = "niche_embedding",
     min_niche_size: int | None = None,
+    cluster_mask: pd.Series | None = None,
     library_key: str | None = None,
     copy: bool = False,
     table_key: str | None = None,
@@ -522,6 +533,13 @@ def calculate_niche_utag(
         aggregation. The selected matrix determines what biological signal is
         used to define niches.
     %(niche_spatial_conn_key)s
+    cluster_mask
+        Boolean :class:`pandas.Series` indexed like :attr:`anndata.AnnData.obs`. ``False``
+        observations are labeled ``'not_a_niche'`` and take no part in the clustering, so they do
+        not shape the niches of the ones kept — they do still count as spatial neighbors, so
+        their features reach the kept embeddings. Observations the mask omits are kept. In effect
+        ``clusterer.fit_predict(embedding[cluster_mask])``. Subset and rebuild the graph with
+        :func:`~squidpy.gr.spatial_neighbors` instead if they should not be neighbors either.
     %(niche_common_params)s
     %(table_key)s
     %(niche_leiden_params)s
@@ -552,6 +570,7 @@ def calculate_niche_utag(
         rng=rng,
         embedding_key_added=embedding_key_added,
         min_niche_size=min_niche_size,
+        cluster_mask=cluster_mask,
         library_key=library_key,
         copy=copy,
         table_key=table_key,
@@ -572,6 +591,7 @@ def calculate_niche_cellcharter(
     use_rep: str | None = None,
     embedding_key_added: str = "niche_embedding",
     min_niche_size: int | None = None,
+    cluster_mask: pd.Series | None = None,
     library_key: str | None = None,
     copy: bool = False,
     table_key: str | None = None,
@@ -642,6 +662,13 @@ def calculate_niche_cellcharter(
     use_rep
         Key in ``adata.obsm`` containing a precomputed reduced representation, such as
         an scVI latent. It is aggregated over the hop rings in place of the PCA of ``adata.X``.
+    cluster_mask
+        Boolean :class:`pandas.Series` indexed like :attr:`anndata.AnnData.obs`. ``False``
+        observations are labeled ``'not_a_niche'`` and take no part in the clustering, so they do
+        not shape the niches of the ones kept — they do still count as spatial neighbors, so
+        their features reach the kept embeddings. Observations the mask omits are kept. In effect
+        ``clusterer.fit_predict(embedding[cluster_mask])``. Subset and rebuild the graph with
+        :func:`~squidpy.gr.spatial_neighbors` instead if they should not be neighbors either.
     %(niche_common_params)s
     %(table_key)s
 
@@ -680,6 +707,7 @@ def calculate_niche_cellcharter(
         rng=rng,
         embedding_key_added=embedding_key_added,
         min_niche_size=min_niche_size,
+        cluster_mask=cluster_mask,
         library_key=library_key,
         copy=copy,
         table_key=table_key,
@@ -1315,6 +1343,7 @@ def _fit_clusterers(
     embedding: Array,
     clusterers: Mapping[str, Clusterer],
     rng: np.random.Generator,
+    *,
     keep: NDArray[np.bool_] | None = None,
 ) -> list[str]:
     """Fit each clusterer on *embedding* and write its labels, returning the column names.
