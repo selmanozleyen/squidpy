@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -495,6 +498,42 @@ def test_library_key_embeds_each_library_on_its_own(monkeypatch):
     )
     # one fit per library, on that library's own observations; a pooled fit is a single 2 * half
     assert seen == [half, half], f"embedder was handed {seen} observations"
+
+
+def test_cross_library_edges_warn():
+    "Stratifying drops those edges rather than rewiring, so the kept cells lose neighbors."
+    base = _two_sections((40, 40))
+    # interleave the sections in space, so a graph built over both of them mixes them
+    base.obsm["spatial"] = np.random.default_rng(1).random((80, 2)) * 10
+    del base.obsp["spatial_connectivities"], base.obsp["spatial_distances"]
+
+    pooled = base.copy()
+    spatial_neighbors_knn(pooled, n_neighs=4)
+    with pytest.warns(UserWarning, match=r"'spatial_connectivities' has \d+ of \d+ edges between libraries"):
+        calculate_niche_utag(pooled, resolutions=1.0, n_neighbors=8, rng=0, library_key="section")
+
+    per_library = base.copy()
+    spatial_neighbors_knn(per_library, n_neighs=4, library_key="section")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        calculate_niche_utag(per_library, resolutions=1.0, n_neighbors=8, rng=0, library_key="section")
+
+
+def test_spatialleiden_checks_both_graphs_for_cross_library_edges():
+    adata = _two_sections((40, 40))
+    neighbors(adata, n_neighbors=8, use_rep="X")  # scanpy's graph knows nothing of the sections
+    with pytest.warns(UserWarning, match=r"'connectivities' has \d+ of \d+ edges between libraries"):
+        calculate_niche_spatialleiden(adata, resolutions=1.0, rng=0, library_key="section")
+
+
+@pytest.mark.parametrize("flavor", ["neighborhood", "utag", "cellcharter", "spatialleiden"])
+def test_min_niche_size_is_not_reported_unused(flavor, caplog):
+    "Every flavor applies it, so no flavor should call it unused."
+    adata = _tiny(n=60)
+    neighbors(adata, n_neighbors=8, use_rep="X")
+    with caplog.at_level(logging.WARNING):
+        calculate_niche(adata, flavor=flavor, groups="ct", n_neighbors=8, resolutions=1.0, min_niche_size=3, rng=0)
+    assert "min_niche_size" not in caplog.text
 
 
 def test_library_key_writes_no_pooled_embedding():

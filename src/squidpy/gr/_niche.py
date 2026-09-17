@@ -460,6 +460,7 @@ def calculate_niche_neighborhood(
         min_niche_size=min_niche_size,
         cluster_mask=cluster_mask,
         library_key=library_key,
+        graph_keys=(spatial_connectivities_key,),
         copy=copy,
         table_key=table_key,
     )
@@ -586,6 +587,7 @@ def calculate_niche_utag(
         min_niche_size=min_niche_size,
         cluster_mask=cluster_mask,
         library_key=library_key,
+        graph_keys=(spatial_connectivities_key,),
         copy=copy,
         table_key=table_key,
     )
@@ -729,6 +731,7 @@ def calculate_niche_cellcharter(
         min_niche_size=min_niche_size,
         cluster_mask=cluster_mask,
         library_key=library_key,
+        graph_keys=(spatial_connectivities_key,),
         copy=copy,
         table_key=table_key,
     )
@@ -756,6 +759,19 @@ def calculate_niche_spatialleiden(
     This is a wrapper around SpatialLeiden :cite:`muellerboetticher2025`, which takes
     :class:`~anndata.AnnData` as input and works with two layers; one latent space and one
     spatial layer. Adapted from https://github.com/HiDiHlabs/SpatialLeiden/.
+
+    Both graphs must already be available and this function constructs neither. The spatial one
+    comes from :func:`~squidpy.gr.spatial_neighbors`; the latent one from
+    :func:`scanpy.pp.neighbors`, whose default output key is why
+    ``latent_connectivities_key`` defaults to ``'connectivities'``.
+
+    With ``library_key`` both graphs are sliced per library, which only preserves a graph that has
+    no edges between libraries. `spatial_neighbors` has a ``library_key`` of its own for that;
+    :func:`scanpy.pp.neighbors` has no equivalent, so build the latent graph per library — it takes
+    any :attr:`~anndata.AnnData.obsm` through ``spatial_key``, so
+    ``spatial_neighbors(adata, spatial_key="X_pca", library_key=..., key_added="latent")`` does it
+    — or build it on an integrated embedding and do not stratify. A graph with edges across
+    libraries warns.
 
     Parameters
     ----------
@@ -814,7 +830,15 @@ def calculate_niche_spatialleiden(
             prefix=prefix,
         )
 
-    return _stratify(data, library_key=library_key, rng=rng, table_key=table_key, copy=copy, run_one=run_one)
+    return _stratify(
+        data,
+        library_key=library_key,
+        rng=rng,
+        table_key=table_key,
+        copy=copy,
+        graph_keys=(latent_connectivities_key, spatial_connectivities_key),
+        run_one=run_one,
+    )
 
 
 @d.dedent
@@ -827,6 +851,7 @@ def calculate_niche_custom(
     min_niche_size: int | None = None,
     cluster_mask: pd.Series | None = None,
     library_key: str | None = None,
+    graph_keys: Sequence[str] = (),
     copy: bool = False,
     table_key: str | None = None,
 ) -> AnnData | None:
@@ -878,7 +903,15 @@ def calculate_niche_custom(
         _postprocess_niche_results(adata, columns, min_niche_size, prefix)
         return columns
 
-    return _stratify(data, library_key=library_key, rng=rng, table_key=table_key, copy=copy, run_one=run_one)
+    return _stratify(
+        data,
+        library_key=library_key,
+        rng=rng,
+        table_key=table_key,
+        copy=copy,
+        graph_keys=graph_keys,
+        run_one=run_one,
+    )
 
 
 def _validate_niche_args(
@@ -946,7 +979,6 @@ def _validate_niche_args(
         "neighborhood": {
             "required": ["groups", "n_neighbors", "resolutions", "spatial_connectivities_key"],
             "optional": [
-                "min_niche_size",
                 "scale",
                 "abs_nhood",
                 "distance",
@@ -968,7 +1000,6 @@ def _validate_niche_args(
             "optional": ["rng", "n_iterations"],
             "unused": [
                 "groups",
-                "min_niche_size",
                 "scale",
                 "abs_nhood",
                 "distance",
@@ -987,7 +1018,6 @@ def _validate_niche_args(
             "optional": ["n_components", "use_rep", "rng"],
             "unused": [
                 "groups",
-                "min_niche_size",
                 "scale",
                 "abs_nhood",
                 "n_neighbors",
@@ -1008,7 +1038,7 @@ def _validate_niche_args(
                 "use_weights",
                 "rng",
             ],
-            "unused": ["groups", "min_niche_size", "scale", "abs_nhood", "n_neighbors", "n_hop_weights", "use_rep"],
+            "unused": ["groups", "scale", "abs_nhood", "n_neighbors", "n_hop_weights", "use_rep"],
         },
     }
 
@@ -1347,6 +1377,27 @@ def _fit_clusterers(
 ############
 
 
+def _warn_if_not_block_diagonal(adata: AnnData, library_key: str, graph_keys: Sequence[str]) -> None:
+    """Slicing per library only preserves a graph that has no edges across libraries."""
+    libraries = np.asarray(adata.obs[library_key])
+    for key in graph_keys:
+        if key not in adata.obsp:
+            continue
+        edges = adata.obsp[key].tocoo()
+        crossing = int((libraries[edges.row] != libraries[edges.col]).sum())
+        if crossing:
+            warnings.warn(
+                f"'{key}' has {crossing} of {edges.nnz} edges between libraries, and stratifying "
+                f"by '{library_key}' keeps only the within-library ones. Those edges are dropped "
+                "rather than replaced, so the kept observations lose neighbors instead of finding "
+                "new ones. Build the graph per library — `spatial_neighbors(..., library_key=...)` "
+                "does this, and takes any `obsm` through `spatial_key`.",
+                UserWarning,
+                # reached through `_stratify` from the flavor the caller invoked
+                stacklevel=4,
+            )
+
+
 def _stratify(
     data: AnnData | SpatialData,
     *,
@@ -1354,6 +1405,7 @@ def _stratify(
     rng: SeedLike | RNGLike | None,
     table_key: str | None,
     copy: bool,
+    graph_keys: Sequence[str],
     run_one: Callable[[AnnData, np.random.Generator, str | None], list[str]],
 ) -> AnnData | None:
     orig_adata = extract_adata_if_sdata(data, table_key=table_key)
@@ -1362,6 +1414,7 @@ def _stratify(
 
     if library_key is not None:
         assert_key_in_adata(adata, library_key, attr="obs")
+        _warn_if_not_block_diagonal(adata, library_key, graph_keys)
         logg.info(f"Stratifying by library_key '{library_key}'")
 
         # each library is an independent clustering problem, so it gets its own rng
