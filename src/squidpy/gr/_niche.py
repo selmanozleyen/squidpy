@@ -315,6 +315,7 @@ def calculate_niche_neighborhood(
     abs_nhood: bool = False,
     n_hop_weights: list[float] | None = None,
     embedding_key_added: str = "niche_embedding",
+    key_added: str = "nhood_niche",
     min_niche_size: int | None = None,
     cluster_mask: pd.Series | None = None,
     library_key: str | None = None,
@@ -406,6 +407,12 @@ def calculate_niche_neighborhood(
         :func:`~squidpy.gr.spatial_neighbors` instead if they should not be neighbors either.
         Called ``mask`` on the deprecated :func:`calculate_niche`, the only other flavor to take
         one.
+    key_added
+        Stem of the :attr:`anndata.AnnData.obs` columns the labels are written to. One column per
+        resolution, named ``f"{{key_added}}_res={{resolution}}"``, so a second call with a
+        different stem does not overwrite the first. A stem rather than an exact name because one
+        call writes one column per resolution, the same reason
+        :func:`~squidpy.gr.spatial_neighbors` and :func:`scanpy.pp.neighbors` treat theirs as one.
     %(niche_common_params)s
     %(table_key)s
     %(niche_leiden_params)s
@@ -437,7 +444,7 @@ def calculate_niche_neighborhood(
     )
 
     clusterers = _leiden_clusterers(
-        base_colname="nhood_niche",
+        base_colname=key_added,
         resolutions=resolutions,
         n_neighbors=n_neighbors,
         flavor=flavor,
@@ -467,6 +474,7 @@ def calculate_niche_utag(
     use_layer: str | None = None,
     spatial_connectivities_key: str = "spatial_connectivities",
     embedding_key_added: str = "niche_embedding",
+    key_added: str = "utag_niche",
     min_niche_size: int | None = None,
     cluster_mask: pd.Series | None = None,
     library_key: str | None = None,
@@ -540,6 +548,12 @@ def calculate_niche_utag(
         their features reach the kept embeddings. Observations the mask omits are kept. In effect
         ``clusterer.fit_predict(embedding[cluster_mask])``. Subset and rebuild the graph with
         :func:`~squidpy.gr.spatial_neighbors` instead if they should not be neighbors either.
+    key_added
+        Stem of the :attr:`anndata.AnnData.obs` columns the labels are written to. One column per
+        resolution, named ``f"{{key_added}}_res={{resolution}}"``, so a second call with a
+        different stem does not overwrite the first. A stem rather than an exact name because one
+        call writes one column per resolution, the same reason
+        :func:`~squidpy.gr.spatial_neighbors` and :func:`scanpy.pp.neighbors` treat theirs as one.
     %(niche_common_params)s
     %(table_key)s
     %(niche_leiden_params)s
@@ -556,7 +570,7 @@ def calculate_niche_utag(
     embedder = partial(_utag_embedding, spatial_connectivities_key=spatial_connectivities_key, use_layer=use_layer)
 
     clusterers = _leiden_clusterers(
-        base_colname="utag_niche",
+        base_colname=key_added,
         resolutions=resolutions,
         n_neighbors=n_neighbors,
         flavor=flavor,
@@ -590,6 +604,7 @@ def calculate_niche_cellcharter(
     n_jobs: int | None = None,
     use_rep: str | None = None,
     embedding_key_added: str = "niche_embedding",
+    key_added: str = "cellcharter_niche",
     min_niche_size: int | None = None,
     cluster_mask: pd.Series | None = None,
     library_key: str | None = None,
@@ -671,6 +686,9 @@ def calculate_niche_cellcharter(
         their features reach the kept embeddings. Observations the mask omits are kept. In effect
         ``clusterer.fit_predict(embedding[cluster_mask])``. Subset and rebuild the graph with
         :func:`~squidpy.gr.spatial_neighbors` instead if they should not be neighbors either.
+    key_added
+        Name of the :attr:`anndata.AnnData.obs` column the labels are written to. Exact rather
+        than a stem, because this flavor writes a single column.
     %(niche_common_params)s
     %(table_key)s
 
@@ -700,7 +718,7 @@ def calculate_niche_cellcharter(
     )
 
     # `GaussianMixture` is a `Clusterer` as it stands, so this flavor needs no wrapper
-    clusterers = {"cellcharter_niche": GaussianMixture(n_components=n_clusters)}
+    clusterers = {key_added: GaussianMixture(n_components=n_clusters)}
 
     return calculate_niche_custom(
         data,
@@ -727,6 +745,7 @@ def calculate_niche_spatialleiden(
     n_iterations: int = -1,
     use_weights: bool | tuple[bool, bool] = True,
     rng: SeedLike | RNGLike | None = None,
+    key_added: str = "spatialleiden",
     min_niche_size: int | None = None,
     library_key: str | None = None,
     copy: bool = False,
@@ -757,6 +776,12 @@ def calculate_niche_spatialleiden(
         Each resolution — and each library when stratifying by ``library_key`` — is
         clustered with an independent rng derived from it.
     %(niche_min_niche_size)s
+    key_added
+        Stem of the :attr:`anndata.AnnData.obs` columns the labels are written to. One column per
+        resolution, named ``f"{{key_added}}_res={{resolution}}"``, so a second call with a
+        different stem does not overwrite the first. A stem rather than an exact name because one
+        call writes one column per resolution, the same reason
+        :func:`~squidpy.gr.spatial_neighbors` and :func:`scanpy.pp.neighbors` treat theirs as one.
     %(library_key)s
     %(copy)s
     %(table_key)s
@@ -777,6 +802,7 @@ def calculate_niche_spatialleiden(
     def run_one(adata: AnnData, rng: np.random.Generator, prefix: str | None) -> list[str]:
         return _spatialleiden_once(
             adata,
+            key_added=key_added,
             resolution_list=resolution_list,
             rng=rng,
             latent_connectivities_key=latent_connectivities_key,
@@ -1395,6 +1421,7 @@ def _merge_library_columns(
 def _spatialleiden_once(
     adata: AnnData,
     *,
+    key_added: str,
     resolution_list: list[Any],
     rng: np.random.Generator,
     latent_connectivities_key: str,
@@ -1425,10 +1452,10 @@ def _spatialleiden_once(
             spatial_neighbors_key=spatial_connectivities_key,
             random_state=legacy_random(res_rng),
             directed=False,
-            key_added=f"spatialleiden_res={res}",
+            key_added=f"{key_added}_res={res}",
         )
 
-    result_columns = [f"spatialleiden_res={res}" for res in resolution_list]
+    result_columns = [f"{key_added}_res={res}" for res in resolution_list]
     _postprocess_niche_results(adata, result_columns, min_niche_size, prefix)
     return result_columns
 
