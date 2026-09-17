@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 import warnings
 
@@ -544,6 +545,65 @@ def test_library_key_writes_no_pooled_embedding():
     calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=0, library_key="section")
     assert "niche_embedding" not in adata.obsm
     assert "utag_niche_res=1.0" in adata.obs, "the labels must still be written"
+
+
+def test_utag_use_rep_replaces_the_pca_it_would_fit():
+    "A representation is already reduced, so utag aggregates it and stops."
+    adata = _tiny(n=60, embedding_cols=5)
+    calculate_niche_utag(adata, resolutions=1.0, n_neighbors=8, rng=0, use_rep="emb")
+    assert adata.obsm["niche_embedding"].shape == (60, 5)
+
+    on_x = _tiny(n=60)
+    calculate_niche_utag(on_x, resolutions=1.0, n_neighbors=8, rng=0, use_rep="X")
+    assert on_x.obsm["niche_embedding"].shape == (60, 6), "'X' is the spelling scanpy takes"
+
+    derived = _tiny(n=60)
+    calculate_niche_utag(derived, resolutions=1.0, n_neighbors=8, rng=0)
+    assert derived.obsm["niche_embedding"].shape[1] == 5, "without it, the PCA still runs"
+
+
+@pytest.mark.parametrize(("use_rep", "shared"), [("emb", True), (None, False)])
+def test_utag_use_rep_keeps_one_basis_across_libraries(monkeypatch, use_rep, shared):
+    "The reason for the parameter: a per-library PCA fits a different basis in every library."
+    adata = _two_sections((60, 60), n_vars=12)
+    adata.obsm["emb"] = np.asarray(sc.pp.pca(adata.X, n_comps=5))
+    kwargs = {"resolutions": 1.0, "n_neighbors": 8, "rng": 0, "use_rep": use_rep}
+
+    blocks = []
+    original = _niche._utag_embedding
+
+    def spy(adata_arg, **kw):
+        blocks.append(original(adata_arg, **kw))
+        return blocks[-1]
+
+    monkeypatch.setattr(_niche, "_utag_embedding", spy)
+    calculate_niche_utag(adata, library_key="section", **kwargs)
+    calculate_niche_utag(adata, **kwargs)
+    per_library, pooled = np.vstack(blocks[:2]), blocks[2]
+
+    # the graph is block diagonal, so aggregating a shared representation is library blind
+    if shared:
+        np.testing.assert_allclose(per_library, pooled, atol=1e-6)
+    else:
+        assert per_library.shape != pooled.shape or not np.allclose(per_library, pooled)
+
+
+def test_utag_use_rep_and_use_layer_are_exclusive():
+    adata = _tiny(embedding_cols=4)
+    adata.layers["counts"] = adata.X.copy()
+    with pytest.raises(ValueError, match=r"at most one of 'groups', 'use_rep' and 'layer'"):
+        calculate_niche_utag(adata, resolutions=1.0, rng=0, use_rep="emb", use_layer="counts")
+
+
+def test_neighborhood_takes_no_use_rep():
+    "Its columns are the `groups` categories, shared across libraries already."
+    assert "use_rep" not in inspect.signature(calculate_niche_neighborhood).parameters
+
+
+def test_cellcharter_use_rep_x_skips_the_pca():
+    adata = _tiny(n=60)
+    calculate_niche_cellcharter(adata, n_clusters=3, distance=1, rng=0, use_rep="X")
+    assert adata.obsm["niche_embedding"].shape == (60, 6 * 2), "X itself, then one ring of it"
 
 
 def test_use_rep_is_aggregated_over_the_hop_rings():

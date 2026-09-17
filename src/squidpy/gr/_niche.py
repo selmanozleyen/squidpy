@@ -255,6 +255,7 @@ def calculate_niche(
             resolutions=resolutions,
             n_neighbors=n_neighbors,
             use_layer=None,
+            use_rep=use_rep,
             spatial_connectivities_key=spatial_connectivities_key,
             embedding_key_added="niche_embedding",
             cluster_mask=mask,
@@ -475,6 +476,7 @@ def calculate_niche_utag(
     use_layer: str | None = None,
     spatial_connectivities_key: str = "spatial_connectivities",
     embedding_key_added: str = "niche_embedding",
+    use_rep: str | None = None,
     key_added: str = "utag_niche",
     min_niche_size: int | None = None,
     cluster_mask: pd.Series | None = None,
@@ -549,6 +551,12 @@ def calculate_niche_utag(
         their features reach the kept embeddings. Observations the mask omits are kept. In effect
         ``clusterer.fit_predict(embedding[cluster_mask])``. Subset and rebuild the graph with
         :func:`~squidpy.gr.spatial_neighbors` instead if they should not be neighbors either.
+    use_rep
+        Key in :attr:`anndata.AnnData.obsm` holding the representation to aggregate over each
+        neighborhood, or ``'X'`` for :attr:`~anndata.AnnData.X` as in :func:`scanpy.pp.neighbors`.
+        Rejected together with ``use_layer``. A representation is taken as already reduced, so the
+        PCA of the aggregate is skipped, which also keeps the embedding on one basis across
+        libraries where that PCA would fit a separate one per library.
     key_added
         Stem of the :attr:`anndata.AnnData.obs` columns the labels are written to. One column per
         resolution, named ``f"{{key_added}}_res={{resolution}}"``, so a second call with a
@@ -568,7 +576,12 @@ def calculate_niche_utag(
 
     """
 
-    embedder = partial(_utag_embedding, spatial_connectivities_key=spatial_connectivities_key, use_layer=use_layer)
+    embedder = partial(
+        _utag_embedding,
+        spatial_connectivities_key=spatial_connectivities_key,
+        use_layer=use_layer,
+        use_rep=use_rep,
+    )
 
     clusterers = _leiden_clusterers(
         base_colname=key_added,
@@ -679,8 +692,11 @@ def calculate_niche_cellcharter(
         already reduced embedding and so skips the PCA.
     %(n_jobs_threads)s
     use_rep
-        Key in ``adata.obsm`` containing a precomputed reduced representation, such as
-        an scVI latent. It is aggregated over the hop rings in place of the PCA of ``adata.X``.
+        Key in :attr:`anndata.AnnData.obsm` holding a reduced representation, such as an scVI
+        latent, or ``'X'`` for :attr:`~anndata.AnnData.X` as in :func:`scanpy.pp.neighbors`. It is
+        aggregated over the hop rings in place of the PCA of ``adata.X``, which also keeps the
+        embedding on one basis across libraries where that PCA would fit a separate one per
+        library.
     cluster_mask
         Boolean :class:`pandas.Series` indexed like :attr:`anndata.AnnData.obs`. ``False``
         observations are labeled ``'not_a_niche'`` and take no part in the clustering, so they do
@@ -997,7 +1013,7 @@ def _validate_niche_args(
         },
         "utag": {
             "required": ["n_neighbors", "resolutions", "spatial_connectivities_key"],
-            "optional": ["rng", "n_iterations"],
+            "optional": ["rng", "n_iterations", "use_rep"],
             "unused": [
                 "groups",
                 "scale",
@@ -1009,7 +1025,6 @@ def _validate_niche_args(
                 "latent_connectivities_key",
                 "layer_ratio",
                 "use_weights",
-                "use_rep",
             ],
         },
         "cellcharter": {
@@ -1195,10 +1210,16 @@ def _nhood_profile_embedding(
     return sc.pp.scale(profile, zero_center=True) if scale else profile
 
 
-def _utag_embedding(adata: AnnData, *, spatial_connectivities_key: str, use_layer: str | None) -> Array:
+def _utag_embedding(
+    adata: AnnData, *, spatial_connectivities_key: str, use_layer: str | None, use_rep: str | None
+) -> Array:
     """Each observation inherits the mean features of its immediate neighbors."""
-    aggregated = nhood_aggregate(adata, layer=use_layer, connectivity_key=spatial_connectivities_key, hops=(1,))
-    return sc.pp.pca(aggregated)
+    aggregated = nhood_aggregate(
+        adata, layer=use_layer, use_rep=use_rep, connectivity_key=spatial_connectivities_key, hops=(1,)
+    )
+    # a representation the caller passes is already reduced, and on a basis shared across
+    # libraries; the PCA here would put the aggregate back on a per-library one
+    return to_dense(aggregated) if use_rep is not None else sc.pp.pca(aggregated)
 
 
 def _nhop_pca_embedding(
@@ -1237,6 +1258,8 @@ def _nhop_pca_embedding(
     # aggregate a narrow dense matrix instead of `distance + 1` copies of every gene
     if use_rep is None:
         features = _pca_features(adata, n_pca_components)
+    elif use_rep == "X":  # the spelling `scanpy.pp.neighbors` takes
+        features = to_dense(adata.X)
     else:
         assert_key_in_adata(adata, use_rep, attr="obsm")
         features = to_dense(adata.obsm[use_rep])

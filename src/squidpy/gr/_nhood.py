@@ -1029,8 +1029,11 @@ def nhood_aggregate(
         features = _onehot(adata.obs[groups])
         has_value = np.asarray(features.sum(axis=1)).ravel() != 0
     elif use_rep is not None:
-        assert_key_in_adata(adata, use_rep, attr="obsm")
-        features = adata.obsm[use_rep]
+        if use_rep == "X":  # the spelling `scanpy.pp.neighbors` takes
+            features = adata.X
+        else:
+            assert_key_in_adata(adata, use_rep, attr="obsm")
+            features = adata.obsm[use_rep]
     elif layer is not None:
         assert_key_in_adata(adata, layer, attr="layers")
         features = adata.layers[layer]
