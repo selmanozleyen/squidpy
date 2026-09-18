@@ -247,10 +247,19 @@ min_niche_size
     are relabeled ``'not_a_niche'``."""
 _niche_library_key = """\
 library_key
-    Key in :attr:`anndata.AnnData.obs` grouping the observations into libraries. Each library is
-    clustered on its own, over its own slice of the graphs — which is the same as a graph built
-    per library only if the graphs have no edges between libraries, so a graph that does is
-    warned about. :func:`~squidpy.gr.spatial_neighbors` builds one per library."""
+    Key in :attr:`anndata.AnnData.obs` grouping the observations into libraries. Each is clustered
+    on its own slice of the graphs, so a graph with edges between libraries loses them and warns.
+    :func:`~squidpy.gr.spatial_neighbors` builds one per library."""
+_niche_cluster_mask = """\
+cluster_mask
+    Boolean :class:`pandas.Series` indexed like :attr:`anndata.AnnData.obs`. ``False``
+    observations are labeled ``'not_a_niche'`` and take no part in the clustering, though they
+    still reach their neighbors through the graph. Observations it omits are kept. To drop them
+    from the graph as well, subset and rebuild it with :func:`~squidpy.gr.spatial_neighbors`."""
+_niche_key_added_stem = """\
+key_added
+    Stem of the :attr:`anndata.AnnData.obs` columns the labels are written to, one per resolution,
+    named ``f"{key_added}_res={resolution}"``."""
 # the postprocessing + output params every user-facing niche function shares, in signature order
 _niche_common_params = f"""\
 {_niche_embedding_key_added}
@@ -519,6 +528,8 @@ d = DocstringProcessor(
     plotting_library_id=_plotting_library_id,
     library_key=_library_key,
     niche_library_key=_niche_library_key,
+    niche_cluster_mask=_niche_cluster_mask,
+    niche_key_added_stem=_niche_key_added_stem,
     niche_spatial_conn_key=_niche_spatial_conn_key,
     niche_embedding_key_added=_niche_embedding_key_added,
     niche_min_niche_size=_niche_min_niche_size,

@@ -107,11 +107,9 @@ def calculate_niche(
     %(niche_library_key)s
     %(table_key)s
     mask
-        Boolean array to filter cells which won't get assigned to a niche. Applied by the three
-        flavors that build an embedding, where it is spelled ``cluster_mask`` — see
-        :func:`calculate_niche_neighborhood`. `{fla.SPATIALLEIDEN.s!r}` cannot honour one and
-        raises; before this it was documented for all four and applied by
-        `{fla.NEIGHBORHOOD.s!r}` alone.
+        Boolean array to filter cells which won't get assigned to a niche. Spelled
+        ``cluster_mask`` on the three flavors that build an embedding, and
+        `{fla.SPATIALLEIDEN.s!r}` raises rather than accepting one it cannot honour.
         Note that if you want to exclude these cells during neighborhood calculation already, you should subset your AnnData table before running 'sq.gr.spatial_neigbors'.
         Mask can look like the following. Here, the index values would correspond to adata.obs.index.
         The entries that are False are the ones ignored.
@@ -400,22 +398,8 @@ def calculate_niche_neighborhood(
         graph-hop distances. If provided, the weights determine the relative
         contribution of direct and higher-order neighbors to the final
         neighborhood profile. If not provided, equal weights are used.
-    cluster_mask
-        Boolean :class:`pandas.Series` indexed like :attr:`anndata.AnnData.obs`. ``False``
-        observations are labeled ``'not_a_niche'`` and take no part in the clustering, so they do
-        not shape the niches of the ones kept — they do still count as spatial neighbors, so
-        their categories reach the kept profiles. Observations the mask omits are kept. In effect
-        ``clusterer.fit_predict(profile[cluster_mask])``. Subset and rebuild the graph with
-        :func:`~squidpy.gr.spatial_neighbors` instead if they should not be neighbors either.
-        Called ``mask`` on the deprecated :func:`calculate_niche`. :func:`calculate_niche_utag`
-        and :func:`calculate_niche_cellcharter` take the same argument;
-        :func:`calculate_niche_spatialleiden` cannot honour one.
-    key_added
-        Stem of the :attr:`anndata.AnnData.obs` columns the labels are written to. One column per
-        resolution, named ``f"{{key_added}}_res={{resolution}}"``, so a second call with a
-        different stem does not overwrite the first. A stem rather than an exact name because one
-        call writes one column per resolution, the same reason
-        :func:`~squidpy.gr.spatial_neighbors` and :func:`scanpy.pp.neighbors` treat theirs as one.
+    %(niche_cluster_mask)s
+    %(niche_key_added_stem)s
     %(niche_common_params)s
     %(table_key)s
     %(niche_leiden_params)s
@@ -546,35 +530,21 @@ def calculate_niche_utag(
         aggregation. The selected matrix determines what biological signal is
         used to define niches.
     %(niche_spatial_conn_key)s
-    cluster_mask
-        Boolean :class:`pandas.Series` indexed like :attr:`anndata.AnnData.obs`. ``False``
-        observations are labeled ``'not_a_niche'`` and take no part in the clustering, so they do
-        not shape the niches of the ones kept — they do still count as spatial neighbors, so
-        their features reach the kept embeddings. Observations the mask omits are kept. In effect
-        ``clusterer.fit_predict(embedding[cluster_mask])``. Subset and rebuild the graph with
-        :func:`~squidpy.gr.spatial_neighbors` instead if they should not be neighbors either.
+    %(niche_cluster_mask)s
     use_rep
         Key in :attr:`anndata.AnnData.obsm` holding the representation to aggregate over each
-        neighborhood, or ``'X'`` for :attr:`~anndata.AnnData.X` as in :func:`scanpy.pp.neighbors`.
-        Rejected together with ``use_layer``. A representation is taken as already reduced, so the
-        PCA of the aggregate is skipped, which also keeps the embedding on one basis across
-        libraries where that PCA would fit a separate one per library.
-    key_added
-        Stem of the :attr:`anndata.AnnData.obs` columns the labels are written to. One column per
-        resolution, named ``f"{{key_added}}_res={{resolution}}"``, so a second call with a
-        different stem does not overwrite the first. A stem rather than an exact name because one
-        call writes one column per resolution, the same reason
-        :func:`~squidpy.gr.spatial_neighbors` and :func:`scanpy.pp.neighbors` treat theirs as one.
+        neighborhood, or ``'X'`` for :attr:`~anndata.AnnData.X`. Taken as already reduced, so the
+        PCA of the aggregate is skipped. Rejected together with ``use_layer``.
+    %(niche_key_added_stem)s
     %(niche_common_params)s
     %(table_key)s
     %(niche_leiden_params)s
 
     Returns
     -------
-    If ``copy=True``, returns a copy of ``adata`` with the spatially aggregated features in
-    ``.obsm[embedding_key_added]`` — reduced by PCA, unless ``use_rep`` supplied them already
-    reduced — and niche assignments added to ``.obs``. Otherwise, modifies ``adata`` in place and
-    returns ``None``.
+    If ``copy=True``, returns a copy of ``adata`` with the aggregated features in
+    ``.obsm[embedding_key_added]``, PCA-reduced unless ``use_rep`` was given, and niche
+    assignments added to ``.obs``. Otherwise, modifies ``adata`` in place and returns ``None``.
 
     """
 
@@ -695,20 +665,11 @@ def calculate_niche_cellcharter(
     %(n_jobs_threads)s
     use_rep
         Key in :attr:`anndata.AnnData.obsm` holding a reduced representation, such as an scVI
-        latent, or ``'X'`` for :attr:`~anndata.AnnData.X` as in :func:`scanpy.pp.neighbors`. It is
-        aggregated over the hop rings in place of the PCA of ``adata.X``, which also keeps the
-        embedding on one basis across libraries where that PCA would fit a separate one per
-        library.
-    cluster_mask
-        Boolean :class:`pandas.Series` indexed like :attr:`anndata.AnnData.obs`. ``False``
-        observations are labeled ``'not_a_niche'`` and take no part in the clustering, so they do
-        not shape the niches of the ones kept — they do still count as spatial neighbors, so
-        their features reach the kept embeddings. Observations the mask omits are kept. In effect
-        ``clusterer.fit_predict(embedding[cluster_mask])``. Subset and rebuild the graph with
-        :func:`~squidpy.gr.spatial_neighbors` instead if they should not be neighbors either.
+        latent, or ``'X'`` for :attr:`~anndata.AnnData.X`. Aggregated over the hop rings in place
+        of the PCA of ``adata.X``.
+    %(niche_cluster_mask)s
     key_added
-        Name of the :attr:`anndata.AnnData.obs` column the labels are written to. Exact rather
-        than a stem, because this flavor writes a single column.
+        Name of the :attr:`anndata.AnnData.obs` column the labels are written to.
     %(niche_common_params)s
     %(table_key)s
 
@@ -778,18 +739,15 @@ def calculate_niche_spatialleiden(
     :class:`~anndata.AnnData` as input and works with two layers; one latent space and one
     spatial layer. Adapted from https://github.com/HiDiHlabs/SpatialLeiden/.
 
-    Both graphs must already be available and this function constructs neither. The spatial one
-    comes from :func:`~squidpy.gr.spatial_neighbors`; the latent one from
-    :func:`scanpy.pp.neighbors`, whose default output key is why
-    ``latent_connectivities_key`` defaults to ``'connectivities'``.
+    This function constructs neither graph. The spatial one comes from
+    :func:`~squidpy.gr.spatial_neighbors`, the latent one from :func:`scanpy.pp.neighbors`, whose
+    output key is why ``latent_connectivities_key`` defaults to ``'connectivities'``.
 
-    With ``library_key`` both graphs are sliced per library, which only preserves a graph that has
-    no edges between libraries. `spatial_neighbors` has a ``library_key`` of its own for that;
-    :func:`scanpy.pp.neighbors` has no equivalent, so build the latent graph per library — it takes
-    any :attr:`~anndata.AnnData.obsm` through ``spatial_key``, so
-    ``spatial_neighbors(adata, spatial_key="X_pca", library_key=..., key_added="latent")`` does it
-    — or build it on an integrated embedding and do not stratify. A graph with edges across
-    libraries warns.
+    ``library_key`` slices both graphs, so both must be built per library.
+    :func:`scanpy.pp.neighbors` cannot do that, but :func:`~squidpy.gr.spatial_neighbors` accepts
+    any :attr:`~anndata.AnnData.obsm` as coordinates::
+
+        spatial_neighbors(adata, spatial_key="X_pca", library_key=..., key_added="latent")
 
     Parameters
     ----------
@@ -810,12 +768,7 @@ def calculate_niche_spatialleiden(
         Each resolution — and each library when stratifying by ``library_key`` — is
         clustered with an independent rng derived from it.
     %(niche_min_niche_size)s
-    key_added
-        Stem of the :attr:`anndata.AnnData.obs` columns the labels are written to. One column per
-        resolution, named ``f"{{key_added}}_res={{resolution}}"``, so a second call with a
-        different stem does not overwrite the first. A stem rather than an exact name because one
-        call writes one column per resolution, the same reason
-        :func:`~squidpy.gr.spatial_neighbors` and :func:`scanpy.pp.neighbors` treat theirs as one.
+    %(niche_key_added_stem)s
     %(niche_library_key)s
     %(copy)s
     %(table_key)s
