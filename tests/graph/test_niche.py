@@ -14,6 +14,7 @@ from pandas import Series
 from scanpy.pp import neighbors
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
+from scipy.spatial import cKDTree
 from spatialdata import SpatialData
 from spatialdata.models import TableModel
 
@@ -741,10 +742,66 @@ def test_composition_profile_rows_sum_exactly():
 
 
 def test_a_feature_matrix_keeps_its_own_precision():
-    "Only the wider side pays for the cast, so a float32 expression matrix aggregates in float32."
+    "Supplied features are not copied into another width, so a float32 X aggregates in float32."
     adata = _tiny(n=60)
     assert adata.X.dtype == np.float32
     assert nhood_aggregate(adata, connectivity_key="spatial_connectivities").dtype == np.float32
+    adata.obsm["emb32"] = np.ones((60, 4), dtype=np.float32)
+    got = nhood_aggregate(adata, use_rep="emb32", connectivity_key="spatial_connectivities")
+    assert got.dtype == np.float32, "a representation the caller supplied must not be widened"
+
+
+def test_float32_features_aggregate_exactly():
+    "`spatial_neighbors` leaves obsp float32, and pre-dividing it put 1/k's rounding in every row."
+    rng = np.random.default_rng(0)
+    n = 4000
+    pts = rng.random((n, 2)) * 26
+    # a radius graph: degrees vary, so 1/k is inexact for most rows
+    pairs = cKDTree(pts).query_pairs(r=1.0, output_type="ndarray")
+    adj = csr_matrix((np.ones(len(pairs), np.float32), (pairs[:, 0], pairs[:, 1])), shape=(n, n))
+    adj = ((adj + adj.T) > 0).astype(np.float32)
+    assert len(set(np.asarray(adj.sum(1)).ravel().astype(int))) > 5, "degrees must vary"
+
+    adata = _tiny(n=n)
+    adata.obsp["spatial_connectivities"] = adj
+    adata.obsm["ones"] = np.ones((n, 8), dtype=np.float32)
+    # the mean of an all-ones matrix is exactly 1.0 and representable at float32, so any deviation
+    # is the division, not the width
+    got = to_dense(nhood_aggregate(adata, use_rep="ones", connectivity_key="spatial_connectivities"))
+    assert got.dtype == np.float32
+    reached = np.asarray(adj.sum(1)).ravel() > 0
+    np.testing.assert_array_equal(got[reached], 1.0)
+
+
+@pytest.mark.parametrize("sparse", [False, True])
+def test_integer_features_aggregate(sparse):
+    "The hop rings are bool, so an integer X sums to an integer, which cannot hold a mean."
+    rng = np.random.default_rng(0)
+    counts = rng.integers(0, 20, (60, 4)).astype(np.int64)
+    adata = AnnData(X=csr_matrix(counts) if sparse else counts)
+    adata.obs_names = [f"c{i}" for i in range(60)]
+    adata.obsm["spatial"] = rng.random((60, 2)) * 10
+    spatial_neighbors_knn(adata, n_neighs=5)
+
+    ring = _aggregate_over(adata.obsp["spatial_connectivities"].astype(bool), adata.X, "mean")
+    assert np.issubdtype(to_dense(ring).dtype, np.floating), "a mean of counts is not a count"
+    # and the whole flavor still runs, which it did not when the quotient went back into an int
+    calculate_niche_cellcharter(adata, use_rep="X", distance=1, n_clusters=2, rng=0)
+
+
+def test_an_isolated_observation_aggregates_to_zero():
+    "`normalize` left a zero row alone; the reciprocal that replaced it must too."
+    adata = _tiny(n=40)
+    graph = adata.obsp["spatial_connectivities"].tolil()
+    graph[7, :] = 0
+    graph[:, 7] = 0
+    adata.obsp["spatial_connectivities"] = graph.tocsr()
+    adata.obsp["spatial_connectivities"].eliminate_zeros()
+
+    for kwargs in ({"groups": "ct"}, {}):
+        got = to_dense(nhood_aggregate(adata, connectivity_key="spatial_connectivities", **kwargs))
+        assert np.isfinite(got).all(), f"{kwargs} left a nan or an inf"
+        np.testing.assert_array_equal(got[7], 0.0)
 
 
 def test_aggregate_over_variance_matches_the_definition():
