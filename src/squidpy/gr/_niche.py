@@ -794,8 +794,8 @@ def calculate_niche_spatialleiden(
             run_one=run_one,
         )
 
-    generator = np.random.default_rng(rng)
-    return _on_table(data, table_key=table_key, copy=copy, work=lambda adata: run_one(adata, generator, None))
+    rng = np.random.default_rng(rng)
+    return _on_table(data, table_key=table_key, copy=copy, work=lambda adata: run_one(adata, rng, None))
 
 
 @d.dedent
@@ -849,7 +849,7 @@ def calculate_niche_custom(
     if not isinstance(embedding_key_added, str) or len(embedding_key_added) == 0:
         raise ValueError(f"'embedding_key_added' must be a non-empty string, got {embedding_key_added!r}")
 
-    generator = np.random.default_rng(rng)
+    rng = np.random.default_rng(rng)
 
     def run(adata: AnnData) -> None:
         keep = None
@@ -866,7 +866,7 @@ def calculate_niche_custom(
         # called here, not via a helper: another frame would shift the warnings' stacklevel
         embedding = embedder(adata)
         adata.obsm[embedding_key_added] = embedding
-        columns = _fit_clusterers(adata, embedding, clusterers, generator, keep=keep)
+        columns = _fit_clusterers(adata, embedding, clusterers, rng, keep=keep)
         _postprocess_niche_results(adata, columns, min_niche_size, None)
 
     return _on_table(data, table_key=table_key, copy=copy, work=run)
@@ -1376,9 +1376,9 @@ def _stratify(
     still comes through here, because it clusters the graphs themselves rather than an embedding.
     """
 
+    rng = np.random.default_rng(rng)
+
     def loop(adata: AnnData) -> None:
-        nonlocal rng
-        rng = np.random.default_rng(rng)
         assert_key_in_adata(adata, library_key, attr="obs")
 
         # slicing per library only preserves a graph with no edges across them
