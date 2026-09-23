@@ -191,6 +191,15 @@ def calculate_niche(
             "its edges. It is 'cluster_mask' on the other three flavors."
         )
 
+    if library_key is not None and flavor != "spatialleiden":
+        raise ValueError(
+            f"'library_key' fitted a separate model per library, so a niche in one library was "
+            f"unrelated to the same-numbered niche in another. {flavor!r} no longer takes one; "
+            "only 'spatialleiden' still does. Build the graph with "
+            "`spatial_neighbors(..., library_key=...)` and leave this unset, passing a "
+            "batch-corrected representation through 'use_rep' where the flavor takes one."
+        )
+
     if flavor == "cellcharter":
         if aggregation is None:
             aggregation = "mean"
@@ -241,7 +250,6 @@ def calculate_niche(
             embedding_key_added="niche_embedding",
             min_niche_size=min_niche_size,
             cluster_mask=mask,
-            library_key=library_key,
             copy=not inplace,
             table_key=table_key,
             n_iterations=n_iterations,
@@ -259,7 +267,6 @@ def calculate_niche(
             embedding_key_added="niche_embedding",
             cluster_mask=mask,
             min_niche_size=min_niche_size,
-            library_key=library_key,
             copy=not inplace,
             table_key=table_key,
             n_iterations=n_iterations,
@@ -278,7 +285,6 @@ def calculate_niche(
             embedding_key_added="niche_embedding",
             cluster_mask=mask,
             min_niche_size=min_niche_size,
-            library_key=library_key,
             copy=not inplace,
             table_key=table_key,
         )
@@ -318,7 +324,6 @@ def calculate_niche_neighborhood(
     key_added: str = "nhood_niche",
     min_niche_size: int | None = None,
     cluster_mask: pd.Series | None = None,
-    library_key: str | None = None,
     copy: bool = False,
     table_key: str | None = None,
     flavor: Literal["igraph", "leidenalg"] = "igraph",
@@ -407,7 +412,7 @@ def calculate_niche_neighborhood(
     Returns
     -------
     If ``copy=True``, returns a copy of ``adata`` with the neighborhood profile
-    stored in ``.obsm[embedding_key_added]``, unless ``library_key`` is given, and niche
+    stored in ``.obsm[embedding_key_added]`` and niche
     assignments added to ``.obs``. Otherwise, modifies ``adata`` in place and returns ``None``.
 
     Notes
@@ -446,7 +451,6 @@ def calculate_niche_neighborhood(
         embedding_key_added=embedding_key_added,
         min_niche_size=min_niche_size,
         cluster_mask=cluster_mask,
-        library_key=library_key,
         graph_keys=(spatial_connectivities_key,),
         copy=copy,
         table_key=table_key,
@@ -466,7 +470,6 @@ def calculate_niche_utag(
     key_added: str = "utag_niche",
     min_niche_size: int | None = None,
     cluster_mask: pd.Series | None = None,
-    library_key: str | None = None,
     copy: bool = False,
     table_key: str | None = None,
     flavor: Literal["igraph", "leidenalg"] = "igraph",
@@ -543,7 +546,7 @@ def calculate_niche_utag(
     Returns
     -------
     If ``copy=True``, returns a copy of ``adata`` with the aggregated features in
-    ``.obsm[embedding_key_added]`` unless ``library_key`` is given, PCA-reduced unless ``use_rep``
+    ``.obsm[embedding_key_added]``, PCA-reduced unless ``use_rep``
     was given, and niche assignments added to ``.obs``. Otherwise, modifies ``adata`` in place
     and returns ``None``.
 
@@ -572,7 +575,6 @@ def calculate_niche_utag(
         embedding_key_added=embedding_key_added,
         min_niche_size=min_niche_size,
         cluster_mask=cluster_mask,
-        library_key=library_key,
         graph_keys=(spatial_connectivities_key,),
         copy=copy,
         table_key=table_key,
@@ -595,7 +597,6 @@ def calculate_niche_cellcharter(
     key_added: str = "cellcharter_niche",
     min_niche_size: int | None = None,
     cluster_mask: pd.Series | None = None,
-    library_key: str | None = None,
     copy: bool = False,
     table_key: str | None = None,
 ) -> AnnData | None:
@@ -650,8 +651,7 @@ def calculate_niche_cellcharter(
         average local expression program. ``"variance"`` emphasizes local
         heterogeneity in the feature representation.
     %(rng)s
-        Seeds the Gaussian mixture clustering step. When stratifying by ``library_key``,
-        every library is fitted with an independent rng derived from it.
+        Seeds the Gaussian mixture clustering step.
     %(niche_spatial_conn_key)s
     n_clusters
         Number of Gaussian mixture components, and therefore the number of niche
@@ -677,7 +677,7 @@ def calculate_niche_cellcharter(
     Returns
     -------
     If ``copy=True``, returns a copy of ``adata`` with the embedding stored in
-    ``.obsm[embedding_key_added]``, unless ``library_key`` is given, and GMM-based niche
+    ``.obsm[embedding_key_added]`` and GMM-based niche
     assignments added to ``.obs``. Otherwise, modifies ``adata`` in place and returns ``None``.
 
     """
@@ -710,7 +710,6 @@ def calculate_niche_cellcharter(
         embedding_key_added=embedding_key_added,
         min_niche_size=min_niche_size,
         cluster_mask=cluster_mask,
-        library_key=library_key,
         graph_keys=(spatial_connectivities_key,),
         copy=copy,
         table_key=table_key,
@@ -842,6 +841,7 @@ def calculate_niche_custom(
         The clusterer labelling each ``adata.obs`` column, keyed by name.
     rng
         Seeds every fit.
+    %(niche_library_key)s
     %(niche_common_params)s
     %(table_key)s
 
