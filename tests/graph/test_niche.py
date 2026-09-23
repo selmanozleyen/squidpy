@@ -549,7 +549,26 @@ def test_integer_features_keep_their_ring_means():
 
     calculate_niche_cellcharter(adata, use_rep="X", distance=1, n_clusters=2, rng=0)
     ring = np.asarray(adata.obsm["niche_embedding"][:, 4:8], dtype=np.float64)
-    assert (ring % 1 != 0).any(), "every ring mean came back whole, so the block truncated them"
+    expected = to_dense(
+        _aggregate_over(
+            adata.obsp["spatial_connectivities"].astype(bool),
+            counts.astype(np.float64),
+            "mean",
+        )
+    )
+    np.testing.assert_allclose(ring, expected, rtol=0, atol=1e-12)
+
+
+@pytest.mark.parametrize("dtype", [bool, np.int64])
+def test_non_float_features_aggregate_exactly(dtype):
+    "`bool @ bool` saturates to True instead of summing, so widening the product is too late."
+    rng = np.random.default_rng(0)
+    n = 40
+    adj = csr_matrix((np.ones(n * 4, bool), (np.repeat(np.arange(n), 4), rng.integers(0, n, n * 4))), shape=(n, n))
+    features = (rng.random((n, 4)) > 0.5) if dtype is bool else rng.integers(0, 20, (n, 4))
+    got = to_dense(_aggregate_over(adj, features, "mean"))
+    expected = to_dense(_aggregate_over(adj.astype(np.float64), features.astype(np.float64), "mean"))
+    np.testing.assert_allclose(got, expected, rtol=0, atol=1e-12)
 
 
 def test_cross_library_edges_warn():
