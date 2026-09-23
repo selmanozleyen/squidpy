@@ -3,7 +3,6 @@ from __future__ import annotations
 import inspect
 import logging
 import warnings
-from functools import partial
 
 import numpy as np
 import pandas as pd
@@ -28,9 +27,8 @@ from squidpy.gr import (
     calculate_niche_utag,
     spatial_neighbors_knn,
 )
-from squidpy.gr._clusterers import LeidenClusterer
 from squidpy.gr._nhood import _aggregate_over, nhood_aggregate
-from squidpy.gr._niche import _fit_clusterers, calculate_niche_custom, compute_hop_adjacency_matrices
+from squidpy.gr._niche import _fit_clusterers, compute_hop_adjacency_matrices
 
 N_NEIGHBORS = 20
 
@@ -505,28 +503,6 @@ def test_cross_library_warning_points_at_the_caller():
     crossing = [w for w in caught if "between libraries" in str(w.message)]
     assert crossing, "no cross-library warning was raised"
     assert crossing[0].filename == __file__, f"points at {crossing[0].filename}, not the caller"
-
-
-def test_mask_emptying_one_library_writes_nothing():
-    "The loop merges each library as it finishes, so it must not start and then raise."
-    adata = _two_sections((40, 40))
-    mask = Series(~(adata.obs["section"] == "s2").to_numpy(), index=adata.obs_names)
-    with pytest.raises(ValueError, match=r"in library 's2': 'cluster_mask' excludes every observation"):
-        calculate_niche_custom(
-            adata,
-            partial(
-                _niche._utag_embedding,
-                spatial_connectivities_key="spatial_connectivities",
-                use_layer=None,
-                use_rep=None,
-            ),
-            {"niche": LeidenClusterer(n_neighbors=8, resolution=1.0)},
-            rng=0,
-            library_key="section",
-            cluster_mask=mask,
-            graph_keys=("spatial_connectivities",),
-        )
-    assert not [c for c in adata.obs.columns if "niche" in c], "a partial result was left behind"
 
 
 def test_non_boolean_mask_raises():

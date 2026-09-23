@@ -451,7 +451,6 @@ def calculate_niche_neighborhood(
         embedding_key_added=embedding_key_added,
         min_niche_size=min_niche_size,
         cluster_mask=cluster_mask,
-        graph_keys=(spatial_connectivities_key,),
         copy=copy,
         table_key=table_key,
     )
@@ -575,7 +574,6 @@ def calculate_niche_utag(
         embedding_key_added=embedding_key_added,
         min_niche_size=min_niche_size,
         cluster_mask=cluster_mask,
-        graph_keys=(spatial_connectivities_key,),
         copy=copy,
         table_key=table_key,
     )
@@ -710,7 +708,6 @@ def calculate_niche_cellcharter(
         embedding_key_added=embedding_key_added,
         min_niche_size=min_niche_size,
         cluster_mask=cluster_mask,
-        graph_keys=(spatial_connectivities_key,),
         copy=copy,
         table_key=table_key,
     )
@@ -801,16 +798,23 @@ def calculate_niche_spatialleiden(
             prefix=prefix,
         )
 
-    return _stratify(
-        data,
-        library_key=library_key,
-        rng=rng,
-        table_key=table_key,
-        copy=copy,
-        graph_keys=(latent_connectivities_key, spatial_connectivities_key),
-        stacklevel=4,
-        run_one=run_one,
-    )
+    # the pipeline runs once over everything; `library_key` opts into the per-library loop, which
+    # is the shape the other flavors have already left behind
+    if library_key is not None:
+        return _stratify(
+            data,
+            library_key=library_key,
+            rng=rng,
+            table_key=table_key,
+            copy=copy,
+            graph_keys=(latent_connectivities_key, spatial_connectivities_key),
+            # warn, loop, _on_table, _stratify, this function, the caller
+            stacklevel=6,
+            run_one=run_one,
+        )
+
+    generator = np.random.default_rng(rng)
+    return _on_table(data, table_key=table_key, copy=copy, work=lambda adata: run_one(adata, generator, None))
 
 
 @d.dedent
@@ -822,8 +826,6 @@ def calculate_niche_custom(
     embedding_key_added: str = "niche_embedding",
     min_niche_size: int | None = None,
     cluster_mask: pd.Series | None = None,
-    library_key: str | None = None,
-    graph_keys: Sequence[str] = (),
     copy: bool = False,
     table_key: str | None = None,
 ) -> AnnData | None:
@@ -841,7 +843,6 @@ def calculate_niche_custom(
         The clusterer labelling each ``adata.obs`` column, keyed by name.
     rng
         Seeds every fit.
-    %(niche_library_key)s
     %(niche_common_params)s
     %(table_key)s
 
@@ -852,8 +853,8 @@ def calculate_niche_custom(
 
     Notes
     -----
-    If ``library_key`` is provided, the computation is performed independently
-    for each library and results are merged back into ``adata``.
+    One embedding and one clustering over everything, so the labels mean the same thing for
+    every observation. Per-library fitting lives in :func:`calculate_niche_spatialleiden`.
 
     See Also
     --------
@@ -867,35 +868,16 @@ def calculate_niche_custom(
     if not isinstance(embedding_key_added, str) or len(embedding_key_added) == 0:
         raise ValueError(f"'embedding_key_added' must be a non-empty string, got {embedding_key_added!r}")
 
-    def run_one(adata: AnnData, rng: np.random.Generator, prefix: str | None) -> list[str]:
+    generator = np.random.default_rng(rng)
+
+    def run(adata: AnnData) -> None:
         # called here, not via a helper: another frame would shift the warnings' stacklevel
         embedding = embedder(adata)
         adata.obsm[embedding_key_added] = embedding
-        columns = _fit_clusterers(adata, embedding, clusterers, rng, keep=_fitted_on(adata, cluster_mask))
-        _postprocess_niche_results(adata, columns, min_niche_size, prefix)
-        return columns
+        columns = _fit_clusterers(adata, embedding, clusterers, generator, keep=_fitted_on(adata, cluster_mask))
+        _postprocess_niche_results(adata, columns, min_niche_size, None)
 
-    if cluster_mask is not None and library_key is not None:
-        # the loop writes each library into `adata` as it finishes, so a late raise would leave
-        # those columns behind
-        adata = extract_adata_if_sdata(data, table_key=table_key)
-        if library_key in adata.obs:
-            for lib_id, names in adata.obs_names.to_series().groupby(adata.obs[library_key], observed=True):
-                try:
-                    _fitted_on(adata[list(names)], cluster_mask)
-                except ValueError as exc:
-                    raise ValueError(f"in library {lib_id!r}: {exc}") from None
-
-    return _stratify(
-        data,
-        library_key=library_key,
-        rng=rng,
-        table_key=table_key,
-        copy=copy,
-        graph_keys=graph_keys,
-        stacklevel=5,
-        run_one=run_one,
-    )
+    return _on_table(data, table_key=table_key, copy=copy, work=run)
 
 
 def _validate_niche_args(
@@ -1390,23 +1372,48 @@ def _warn_if_not_block_diagonal(adata: AnnData, library_key: str, graph_keys: Se
             )
 
 
+def _on_table(
+    data: AnnData | SpatialData,
+    *,
+    table_key: str | None,
+    copy: bool,
+    work: Callable[[AnnData], None],
+) -> AnnData | None:
+    """Run *work* on the table, taking it out of a SpatialData and putting it back."""
+    orig_adata = extract_adata_if_sdata(data, table_key=table_key)
+    adata = orig_adata.copy() if copy else orig_adata
+    work(adata)
+
+    # For SpatialData, the column names shouldn't have = sign. Hence, run sanitize_table.
+    # TODO: In future, change the naming standard of any niche columns added to not have '=' to be compatible with spatialdata naming
+    if isinstance(data, SpatialData):
+        sanitize_table(adata)
+
+    return adata if copy else None
+
+
 def _stratify(
     data: AnnData | SpatialData,
     *,
-    library_key: str | None,
+    library_key: str,
     rng: SeedLike | RNGLike | None,
     table_key: str | None,
     copy: bool,
     graph_keys: Sequence[str],
-    # the two call sites sit at different depths, so the caller counts it
+    # the caller counts it, since only one flavor reaches here
     stacklevel: int,
     run_one: Callable[[AnnData, np.random.Generator, str | None], list[str]],
 ) -> AnnData | None:
-    orig_adata = extract_adata_if_sdata(data, table_key=table_key)
-    adata = orig_adata.copy() if copy else orig_adata
-    rng = np.random.default_rng(rng)
+    """Fit one model per library and merge the labels back.
 
-    if library_key is not None:
+    Deprecated shape: the pipeline in `calculate_niche_custom` fits one model over everything,
+    which is what makes labels comparable between libraries. Only `calculate_niche_spatialleiden`
+    still comes through here, because it clusters the graphs themselves rather than an embedding.
+    """
+
+    def loop(adata: AnnData) -> None:
+        nonlocal rng
+        rng = np.random.default_rng(rng)
         assert_key_in_adata(adata, library_key, attr="obs")
         _warn_if_not_block_diagonal(adata, library_key, graph_keys, stacklevel)
         logg.info(f"Stratifying by library_key '{library_key}'")
@@ -1437,15 +1444,8 @@ def _stratify(
         # the per-library labels go in as strings, so cast once every library has been seen
         for col in added_columns:
             adata.obs[col] = adata.obs[col].astype("category")
-    else:
-        run_one(adata, rng, None)
 
-    # For SpatialData, the column names shouldn't have = sign. Hence, run sanitize_table.
-    # TODO: In future, change the naming standard of any niche columns added to not have '=' to be compatible with spatialdata naming
-    if isinstance(data, SpatialData):
-        sanitize_table(adata)
-
-    return adata if copy else None
+    return _on_table(data, table_key=table_key, copy=copy, work=loop)
 
 
 def _merge_library_columns(
