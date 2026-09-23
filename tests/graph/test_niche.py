@@ -562,6 +562,20 @@ def test_the_umbrella_refuses_a_library_key_it_can_no_longer_honour():
     assert "library_key" in inspect.signature(calculate_niche_spatialleiden).parameters
 
 
+def test_integer_features_keep_their_ring_means():
+    "The block the rings are written into took the features' dtype, so counts truncated the mean."
+    rng = np.random.default_rng(0)
+    counts = rng.integers(0, 20, (60, 4)).astype(np.int64)
+    adata = AnnData(X=counts)
+    adata.obs_names = [f"c{i}" for i in range(60)]
+    adata.obsm["spatial"] = rng.random((60, 2)) * 10
+    spatial_neighbors_knn(adata, n_neighs=5)
+
+    calculate_niche_cellcharter(adata, use_rep="X", distance=1, n_clusters=2, rng=0)
+    ring = np.asarray(adata.obsm["niche_embedding"][:, 4:8], dtype=np.float64)
+    assert (ring % 1 != 0).any(), "every ring mean came back whole, so the block truncated them"
+
+
 def test_cross_library_edges_warn():
     "Stratifying drops those edges rather than rewiring, so the kept cells lose neighbors."
     base = _two_sections((40, 40))

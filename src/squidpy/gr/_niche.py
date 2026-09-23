@@ -1235,7 +1235,9 @@ def _nhop_pca_embedding(
     # hop 0 is the observation itself, so it heads the concatenation and every ring follows.
     # Filling a preallocated block keeps the features' dtype and frees each aggregate as it lands
     width = features.shape[1]
-    embedding = np.empty((features.shape[0], width * (len(rings) + 1)), dtype=features.dtype)
+    # a ring mean is not a count, so integer features cannot hold the block they are written into
+    dtype = np.result_type(features.dtype, np.float32)
+    embedding = np.empty((features.shape[0], width * (len(rings) + 1)), dtype=dtype)
     embedding[:, :width] = features
     for position, ring in enumerate(rings, start=1):
         embedding[:, position * width : (position + 1) * width] = _aggregate_over(ring, features, aggregation)
