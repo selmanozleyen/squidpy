@@ -75,5 +75,7 @@ class LeidenClusterer(ClusterMixin, BaseEstimator):
             **kwargs,
         )
 
-        self.labels_ = shell.obs["niche"].to_numpy()
+        # integer labels, as sklearn's clusterers give; scanpy orders the categories numerically,
+        # so each code is its label
+        self.labels_ = shell.obs["niche"].cat.codes.to_numpy()
         return self
