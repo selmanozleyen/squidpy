@@ -1049,13 +1049,13 @@ def nhood_aggregate(
     if len(given) > 1:
         raise ValueError(f"pass at most one of 'groups', 'use_rep' and 'layer', got {given}")
 
-    # `has_value` says which observations have something to contribute; only a category can
-    # be unassigned, so a feature matrix leaves every row valid
+    # only a category can be missing, so a feature matrix leaves every observation a neighbor
     has_value = None
     if groups is not None:
         assert_key_in_adata(adata, groups, attr="obs")
         features = _onehot(adata.obs[groups])
-        has_value = np.asarray(features.sum(axis=1)).ravel() != 0
+        # an observation with no category is not a neighbor either, so it leaves every denominator
+        has_value = adata.obs[groups].notna().to_numpy()
     elif use_rep is not None:
         if use_rep == "X":  # the spelling `scanpy.pp.neighbors` takes
             features = adata.X

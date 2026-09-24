@@ -304,6 +304,22 @@ def test_neighborhood_profile_on_an_irregular_graph():
     np.testing.assert_allclose(profile, expected)
 
 
+def test_neighborhood_profile_skips_unlabelled_neighbors():
+    """A neighbor with no category counts towards no one's neighbor count."""
+    # cell 0 neighbors cells 1-4: a, a, b and one with no celltype
+    adata = AnnData(
+        np.zeros((5, 1), dtype=np.float32),
+        obs=pd.DataFrame({"celltype": pd.Categorical(["a", "a", "a", "b", None])}, index=list("vwxyz")),
+    )
+    adj = np.zeros((5, 5))
+    adj[0, 1:] = adj[1:, 0] = 1.0
+    adata.obsp["spatial_connectivities"] = csr_matrix(adj)
+
+    profile = to_dense(nhood_aggregate(adata, groups="celltype", hops=(1,), aggregation="mean"))
+    # [2/3, 1/3] over the three labelled neighbors, not [1/2, 1/4] over all four
+    np.testing.assert_allclose(profile[0], [2 / 3, 1 / 3])
+
+
 def _weighted_square() -> AnnData:
     """Four cells in a ring, categories a b a b, with one heavy edge (0-1)."""
     adata = AnnData(
