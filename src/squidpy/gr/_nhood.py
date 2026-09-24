@@ -950,9 +950,14 @@ def _power_adjacencies(adj: CSBase, max_hop: int) -> list[CSBase]:
     if max_hop < 1:
         raise ValueError(f"max_hop must be >= 1, got {max_hop}.")
 
-    adjacencies, power = [adj], adj
+    # Edge weights apply to edges, so hop 1 enters as the caller gave it. Past it there are
+    # none to apply: scipy's product counts walks, and a cell reached by two paths is still
+    # one cell, so the reach is a set. `bool @ bool` saturates to True, which is exactly that.
+    reach = adj.astype(bool)
+    reach.eliminate_zeros()
+    adjacencies, power = [adj], reach
     for _ in range(1, max_hop):
-        power = power @ adj
+        power = power @ reach
         adjacencies.append(power)
     return adjacencies
 
@@ -1027,8 +1032,8 @@ def nhood_aggregate(
 ) -> Array | CSBase:
     """Summarise each neighborhood into one block of ``n_features`` columns.
 
-    Matrix powers, not disjoint rings: the hops are summed, so multiplicity weighs a near
-    neighbor more.
+    Matrix powers, not disjoint rings, so a hop restates the ones below it. Each cell in
+    reach counts once: a cell two paths away is still one cell.
     """
     _assert_hop_request(adata, connectivity_key, hops)
     if aggregation not in ("mean", "sum", "variance"):

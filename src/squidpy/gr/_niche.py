@@ -1094,6 +1094,12 @@ def _check_unnecessary_args(flavor: str, param_dict: dict[str, Any], param_specs
 NicheEmbedder = Callable[[AnnData], Array]
 
 
+def _has_edge_weights(adata: AnnData, key: str) -> bool:
+    """True when the graph carries values other than 0 and 1."""
+    weights = adata.obsp[key].data
+    return bool(weights.size) and not np.array_equal(weights, weights.astype(bool))
+
+
 def _nhood_profile_embedding(
     adata: AnnData,
     *,
@@ -1111,6 +1117,18 @@ def _nhood_profile_embedding(
         raise ValueError(
             f"'n_hop_weights' has {len(n_hop_weights)} value(s) but 'distance' is {distance}. "
             f"Earlier versions padded a short list with its last value; pass all {distance}."
+        )
+
+    if _has_edge_weights(adata, spatial_connectivities_key):
+        warnings.warn(
+            f"'{spatial_connectivities_key}' carries non-binary edge weights. They weight hop 1, "
+            "so the profile is the share of connectivity reaching each category rather than the "
+            "share of neighboring cells. Set them to 1 for a plain composition. Hops past the "
+            "first are unweighted either way, since only edges carry weights.",
+            UserWarning,
+            # `_on_table`, the pipeline's `run` and the embedder sit in between. Still one short
+            # through `calculate_niche`.
+            stacklevel=6,
         )
 
     profile = nhood_aggregate(
@@ -1159,12 +1177,11 @@ def _nhop_pca_embedding(
     hops = range(distance + 1)
     _assert_hop_request(adata, spatial_connectivities_key, hops)
 
-    weights = adata.obsp[spatial_connectivities_key].data
-    if weights.size and not np.array_equal(weights, weights.astype(bool)):
+    if _has_edge_weights(adata, spatial_connectivities_key):
         warnings.warn(
             f"'{spatial_connectivities_key}' carries non-binary edge weights, which this flavor "
-            "ignores: the hop rings are boolean, as in CellCharter. Use the 'neighborhood' flavor "
-            "if the weights should count.",
+            "ignores entirely: the hop rings are boolean, as in CellCharter. The 'neighborhood' "
+            "flavor weights hop 1 by them.",
             UserWarning,
             # `_on_table`, the pipeline's `run` and the embedder sit in between. Still one short
             # through `calculate_niche`.

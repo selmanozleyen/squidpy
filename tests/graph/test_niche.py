@@ -244,10 +244,13 @@ def test_cellcharter_rejects_a_distance_below_one(dummy_adata2: AnnData, distanc
         calculate_niche_cellcharter(dummy_adata2, distance=distance, n_clusters=2, rng=0)
 
 
-def test_neighborhood_profile_weights_by_path_count(dummy_adata2: AnnData):
-    """Through the public call, with `scale=False` so the raw profile survives."""
+def test_neighborhood_profile_counts_each_neighbor_once(dummy_adata2: AnnData):
+    """Through the public call, with `scale=False` so the raw profile survives.
+
+    Past hop 1 the reach is a set, so a cell two paths away counts once, not twice.
+    """
     spatial_neighbors_knn(dummy_adata2, n_neighs=3)
-    adj = dummy_adata2.obsp["spatial_connectivities"]
+    adj = _toarray(dummy_adata2.obsp["spatial_connectivities"])
     one_hot = pd.get_dummies(dummy_adata2.obs["celltype"], dtype=np.float64).to_numpy()
 
     out = calculate_niche_neighborhood(
@@ -262,14 +265,83 @@ def test_neighborhood_profile_weights_by_path_count(dummy_adata2: AnnData):
     )
     got = np.asarray(out.obsm["niche_embedding"])
 
-    expected, power = np.zeros_like(got), adj
-    for hop in range(3):
-        if hop:
-            power = power @ adj
-        profile = power @ one_hot
+    expected = np.zeros_like(got)
+    for hop in range(1, 4):
+        # hop 1 keeps the supplied edge weights; beyond it only reachability is defined
+        reach = adj if hop == 1 else (np.linalg.matrix_power(adj != 0, hop) > 0).astype(np.float64)
+        profile = reach @ one_hot
         total = profile.sum(axis=1)[:, None]
         expected += np.divide(profile, total, out=np.zeros_like(profile), where=total != 0)
     np.testing.assert_allclose(got, expected / 3, rtol=1e-6, atol=1e-7)
+
+
+def test_neighborhood_profile_on_an_irregular_graph():
+    """A cell with fewer neighbors than the densest one still gets its own composition.
+
+    The pre-refactor profile padded every row out to the maximum degree and counted the
+    padding as the last cell's category, so all rows came back identical.
+    """
+    # degrees 3, 2, 2, 1 - cell 3 is the low-degree one, and 'b' is what padding injected
+    edges = [(0, 1), (0, 2), (0, 3), (1, 2)]
+    adata = AnnData(
+        np.zeros((4, 1), dtype=np.float32),
+        obs=pd.DataFrame({"celltype": pd.Categorical(["a", "b", "a", "b"])}, index=list("wxyz")),
+    )
+    adj = np.zeros((4, 4))
+    for i, j in edges:
+        adj[i, j] = adj[j, i] = 1.0
+    adata.obsp["spatial_connectivities"] = csr_matrix(adj)
+
+    profile = to_dense(nhood_aggregate(adata, groups="celltype", hops=(1,), aggregation="mean"))
+    expected = np.array(
+        [
+            [1 / 3, 2 / 3],  # neighbors 1, 2, 3 -> b, a, b
+            [1.0, 0.0],  # neighbors 0, 2    -> a, a
+            [0.5, 0.5],  # neighbors 0, 1    -> a, b
+            [1.0, 0.0],  # neighbor  0       -> a
+        ]
+    )
+    np.testing.assert_allclose(profile, expected)
+
+
+def _weighted_square() -> AnnData:
+    """Four cells in a ring, categories a b a b, with one heavy edge (0-1)."""
+    adata = AnnData(
+        np.zeros((4, 1), dtype=np.float32),
+        obs=pd.DataFrame({"celltype": pd.Categorical(["a", "b", "a", "b"])}, index=list("wxyz")),
+    )
+    adj = np.zeros((4, 4))
+    for (i, j), weight in zip([(0, 1), (0, 2), (1, 3), (2, 3)], [3.0, 1.0, 1.0, 1.0], strict=True):
+        adj[i, j] = adj[j, i] = weight
+    adata.obsp["spatial_connectivities"] = csr_matrix(adj)
+    return adata
+
+
+def test_neighborhood_profile_weights_hop_one_only():
+    """Edge weights apply to edges, so hop 1 uses them and the hops past it cannot."""
+    weighted = _weighted_square()
+    binary = _weighted_square()
+    binary.obsp["spatial_connectivities"] = csr_matrix(
+        (_toarray(binary.obsp["spatial_connectivities"]) != 0).astype(np.float64)
+    )
+
+    def profile(adata: AnnData, hop: int) -> np.ndarray:
+        return to_dense(nhood_aggregate(adata, groups="celltype", hops=(hop,), aggregation="mean"))
+
+    # cell 0 neighbors 1 ('b', weight 3) and 2 ('a', weight 1)
+    np.testing.assert_allclose(profile(weighted, 1)[0], [0.25, 0.75])
+    np.testing.assert_allclose(profile(binary, 1)[0], [0.5, 0.5])
+    # hop 2 is reachability, so the heavy edge cannot tilt it
+    np.testing.assert_allclose(profile(weighted, 2), profile(binary, 2))
+
+
+def test_neighborhood_warns_once_on_a_weighted_graph():
+    """The warning is actionable: setting the weights to 1 is what it asks for."""
+    with pytest.warns(UserWarning, match=r"non-binary edge weights.*Set them to 1") as caught:
+        calculate_niche_neighborhood(
+            _weighted_square(), groups="celltype", resolutions=1.0, n_neighbors=2, copy=True, rng=0
+        )
+    assert caught[0].filename == __file__, f"attributed to {caught[0].filename}"
 
 
 def _toarray(mat):
