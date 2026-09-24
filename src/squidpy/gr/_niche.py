@@ -1322,7 +1322,16 @@ def _niche_labels(labels: NDArray[np.str_] | NDArray[np.object_], min_niche_size
     if min_niche_size is not None:
         niches, counts = np.unique(labels, return_counts=True)
         labels = np.where(np.isin(labels, niches[counts < min_niche_size]), "not_a_niche", labels)
-    return pd.Categorical(labels)
+    # the categories order the legend and the colors, so keep `sc.tl.leiden`'s: 0, 1, 2, ... 10
+    return pd.Categorical(labels, categories=sorted(np.unique(labels), key=_label_order))
+
+
+def _label_order(label: str) -> tuple[bool, int, str]:
+    """Numeric labels in numeric order, then any other label as text."""
+    try:
+        return False, int(label), ""
+    except ValueError:
+        return True, 0, label
 
 
 ############

@@ -570,6 +570,12 @@ def test_non_float_features_aggregate_exactly(dtype):
     np.testing.assert_allclose(got, expected, rtol=0, atol=1e-12)
 
 
+def test_niche_categories_are_in_numeric_order():
+    "They order the legend and the colors, so 10 goes after 9 rather than after 1, as `sc.tl.leiden` has it."
+    labels = np.array(["10", "2", "not_a_niche", "0", "1", "9", "2"])
+    assert list(_niche._niche_labels(labels, None).categories) == ["0", "1", "2", "9", "10", "not_a_niche"]
+
+
 @pytest.mark.parametrize("min_niche_size", [None, 3])
 @pytest.mark.parametrize("flavor", ["neighborhood", "utag", "cellcharter", "spatialleiden"])
 def test_niche_labels_are_strings_on_every_flavor(flavor, min_niche_size):
