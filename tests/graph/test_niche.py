@@ -570,6 +570,20 @@ def test_non_float_features_aggregate_exactly(dtype):
     np.testing.assert_allclose(got, expected, rtol=0, atol=1e-12)
 
 
+@pytest.mark.parametrize("min_niche_size", [None, 3])
+@pytest.mark.parametrize("flavor", ["neighborhood", "utag", "cellcharter", "spatialleiden"])
+def test_niche_labels_are_strings_on_every_flavor(flavor, min_niche_size):
+    "spatialleiden writes its own column, and used to leave integers there unless min_niche_size relabeled it."
+    adata = _tiny(n=60)
+    neighbors(adata, n_neighbors=8, use_rep="X")
+    calculate_niche(
+        adata, flavor=flavor, groups="ct", n_neighbors=8, resolutions=1.0, min_niche_size=min_niche_size, rng=0
+    )
+    column = next(c for c in adata.obs.columns if "niche" in c or c.startswith("spatialleiden"))
+    assert adata.obs[column].dtype == "category"
+    assert all(isinstance(label, str) for label in adata.obs[column].cat.categories)
+
+
 @pytest.mark.parametrize("flavor", ["neighborhood", "utag", "cellcharter", "spatialleiden"])
 def test_min_niche_size_is_not_reported_unused(flavor, caplog):
     "Every flavor applies it, so no flavor should call it unused."

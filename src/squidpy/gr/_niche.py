@@ -850,8 +850,7 @@ def calculate_niche_custom(
         # called here, not via a helper: another frame would shift the warnings' stacklevel
         embedding = embedder(adata)
         adata.obsm[embedding_key_added] = embedding
-        columns = _fit_clusterers(adata, embedding, clusterers, rng, keep=keep)
-        _postprocess_niche_results(adata, columns, min_niche_size)
+        _fit_clusterers(adata, embedding, clusterers, rng, keep=keep, min_niche_size=min_niche_size)
 
     return _on_table(data, table_key=table_key, copy=copy, work=run)
 
@@ -1288,6 +1287,7 @@ def _fit_clusterers(
     rng: np.random.Generator,
     *,
     keep: NDArray[np.bool_] | None = None,
+    min_niche_size: int | None = None,
 ) -> list[str]:
     """Fit each clusterer on *embedding* and write its labels, returning the column names.
 
@@ -1313,8 +1313,16 @@ def _fit_clusterers(
         else:
             labels = np.full(adata.n_obs, "not_a_niche", dtype=object)
             labels[keep] = np.asarray(fit.fit_predict(embedding[keep])).astype(str)
-        adata.obs[column] = pd.Categorical(labels)
+        adata.obs[column] = _niche_labels(labels, min_niche_size)
     return list(clusterers)
+
+
+def _niche_labels(labels: NDArray[np.str_] | NDArray[np.object_], min_niche_size: int | None) -> pd.Categorical:
+    """String niche labels as a categorical, niches under *min_niche_size* relabeled ``'not_a_niche'``."""
+    if min_niche_size is not None:
+        niches, counts = np.unique(labels, return_counts=True)
+        labels = np.where(np.isin(labels, niches[counts < min_niche_size]), "not_a_niche", labels)
+    return pd.Categorical(labels)
 
 
 ############
@@ -1377,38 +1385,7 @@ def _spatialleiden_once(
             directed=False,
             key_added=f"{key_added}_res={res}",
         )
-
-    result_columns = [f"{key_added}_res={res}" for res in resolution_list]
-    _postprocess_niche_results(adata, result_columns, min_niche_size)
-
-
-def _postprocess_niche_results(
-    adata: AnnData,
-    result_columns: list[str],
-    min_niche_size: int | None = None,
-) -> None:
-    """Refine niche assignments in place, rewriting each column in ``result_columns``.
-
-    Parameters
-    ----------
-    adata
-        Annotated data matrix.
-    result_columns
-        Columns in ``adata.obs`` holding the niche assignments to refine.
-    min_niche_size
-        Niches with fewer than this many observations are relabeled ``"not_a_niche"``.
-
-    Notes
-    -----
-    Columns are modified in place, so the niche column name does not depend on
-    which of these options were supplied.
-    """
-    if min_niche_size is None:
-        return
-
-    for col in result_columns:
-        # str, so that "not_a_niche" can be assigned regardless of the clusterer's dtype
-        labels = adata.obs[col].astype(str)
-        counts = labels.value_counts()
-        labels[labels.isin(counts[counts < min_niche_size].index)] = "not_a_niche"
-        adata.obs[col] = labels.astype("category")
+        # `sl.spatialleiden` writes its labels into `obs` rather than returning them, so read them
+        # back and finish them as every other flavor's are: string labels, small niches relabeled
+        column = f"{key_added}_res={res}"
+        adata.obs[column] = _niche_labels(adata.obs[column].to_numpy().astype(str), min_niche_size)
