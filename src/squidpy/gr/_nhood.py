@@ -15,7 +15,7 @@ from fast_array_utils import stats as fau_stats
 from fast_array_utils.conv import to_dense
 from fast_array_utils.types import CSBase
 from fast_array_utils.types import HasArrayNamespace as Array
-from numba import njit, prange
+from numba import get_num_threads, njit, prange
 from numba.typed import List
 from numba_progress import ProgressBar
 from numpy.typing import NDArray
@@ -861,7 +861,6 @@ def _bfs_shells(
     indptr: NDArrayA,
     indices: NDArrayA,
     max_hop: int,
-    n_threads: int,
     counts: NDArrayA,
     base: NDArrayA,
     rowptr: NDArrayA,
@@ -869,6 +868,8 @@ def _bfs_shells(
     fill: bool,
 ) -> None:
     n = indptr.shape[0] - 1
+    # one chunk per thread, each with its own scratch row; the pool is whatever `numba_threads` set
+    n_threads = get_num_threads()
     stamp = np.full((n_threads, n), -1, dtype=indices.dtype)
     queue = np.empty((n_threads, n), dtype=indices.dtype)
 
@@ -926,14 +927,14 @@ def compute_hop_adjacency_matrices(
     no_out = np.zeros(1, dtype=indices.dtype)
     n_jobs = get_n_numba_threads(n_jobs)
     with numba_threads(n_jobs):
-        _bfs_shells(indptr, indices, max_hop, n_jobs, counts, no_base, counts, no_out, False)
+        _bfs_shells(indptr, indices, max_hop, counts, no_base, counts, no_out, False)
 
         rowptr = np.zeros((max_hop, n + 1), dtype=np.int64)
         np.cumsum(counts, axis=1, out=rowptr[:, 1:])
         base = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(rowptr[:, -1])))
 
         out = np.empty(int(base[-1]), dtype=indices.dtype)  # shell column indices, same dtype as the input's
-        _bfs_shells(indptr, indices, max_hop, n_jobs, counts, base, rowptr, out, True)
+        _bfs_shells(indptr, indices, max_hop, counts, base, rowptr, out, True)
 
     shells: list[CSBase] = []
     for hop in range(max_hop):
