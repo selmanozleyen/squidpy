@@ -883,13 +883,17 @@ def _bfs_shells(
             for hop in range(1, max_hop + 1):
                 new_tail = _expand(indptr, indices, stamp[thread], src, queue[thread], head, tail)
                 found = new_tail - tail
-                if fill:
-                    # contiguous, so the row is a straight copy with no write cursor
-                    at = base[hop - 1] + rowptr[hop - 1, src]
-                    for g in range(found):
-                        out[at + g] = queue[thread, tail + g]
-                else:
-                    counts[hop - 1, src] += found
+                # hop 1 is the input graph, which the caller keeps as ring 0, so it is expanded
+                # only as the frontier for hop 2 and nothing is written for it
+                ring = hop - 2
+                if ring >= 0:
+                    if fill:
+                        # contiguous, so the row is a straight copy with no write cursor
+                        at = base[ring] + rowptr[ring, src]
+                        for g in range(found):
+                            out[at + g] = queue[thread, tail + g]
+                    else:
+                        counts[ring, src] += found
                 head, tail = tail, new_tail
                 if found == 0:
                     break
@@ -919,31 +923,32 @@ def compute_hop_adjacency_matrices(
     adj = (adjacency_matrix_orig if issparse(adjacency_matrix_orig) else csr_array(adjacency_matrix_orig)).tocsr()
     adj = adj.astype(bool)
     adj.eliminate_zeros()
+    if max_hop == 1:
+        return [csr_matrix(adj)]
     n = adj.shape[0]
     indptr, indices = adj.indptr, adj.indices
 
-    counts = np.zeros((max_hop, n), dtype=np.int64)
+    # one row per ring past the first; ring 0 is the input itself
+    counts = np.zeros((max_hop - 1, n), dtype=np.int64)
     no_base = np.zeros(1, dtype=np.int64)
     no_out = np.zeros(1, dtype=indices.dtype)
     n_jobs = get_n_numba_threads(n_jobs)
     with numba_threads(n_jobs):
         _bfs_shells(indptr, indices, max_hop, counts, no_base, counts, no_out, False)
 
-        rowptr = np.zeros((max_hop, n + 1), dtype=np.int64)
+        rowptr = np.zeros((max_hop - 1, n + 1), dtype=np.int64)
         np.cumsum(counts, axis=1, out=rowptr[:, 1:])
         base = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(rowptr[:, -1])))
 
         out = np.empty(int(base[-1]), dtype=indices.dtype)  # shell column indices, same dtype as the input's
         _bfs_shells(indptr, indices, max_hop, counts, base, rowptr, out, True)
 
-    shells: list[CSBase] = []
-    for hop in range(max_hop):
-        lo, hi = int(base[hop]), int(base[hop + 1])
-        shell = csr_matrix((np.ones(hi - lo, dtype=bool), out[lo:hi], rowptr[hop]), shape=(n, n))
+    shells: list[CSBase] = [csr_matrix(adj)]
+    for ring in range(max_hop - 1):
+        lo, hi = int(base[ring]), int(base[ring + 1])
+        shell = csr_matrix((np.ones(hi - lo, dtype=bool), out[lo:hi], rowptr[ring]), shape=(n, n))
         shell.sort_indices()  # breadth-first order is not sorted order
         shells.append(shell)
-
-    shells[0] = csr_matrix(adj)
     return shells
 
 
