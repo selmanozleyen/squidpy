@@ -21,7 +21,7 @@ from numba_progress import ProgressBar
 from numpy.typing import NDArray
 from pandas import CategoricalDtype
 from scanpy import logging as logg
-from scipy.sparse import csr_array, csr_matrix, diags, issparse
+from scipy.sparse import csr_array, csr_matrix, issparse
 from spatialdata import SpatialData
 
 from squidpy._constants._constants import Centrality
@@ -975,9 +975,17 @@ def _onehot(labels: pd.Series) -> csr_matrix:
 
 
 def _aggregate_over(
-    adj: CSBase, features: Array | CSBase, aggregation: Literal["mean", "sum", "variance"]
+    adj: CSBase,
+    features: Array | CSBase,
+    aggregation: Literal["mean", "sum", "variance"],
+    *,
+    counted: NDArray[np.bool_] | None = None,
 ) -> Array | CSBase:
-    """Aggregate *features* over the neighborhood each row of *adj* defines."""
+    """Aggregate *features* over the neighborhood each row of *adj* defines.
+
+    *counted* marks the observations that count as neighbors. The others must have all-zero
+    features, so they already add nothing to a sum and only the neighbor count leaves them out.
+    """
     if aggregation == "sum":
         return adj @ features
 
@@ -985,7 +993,10 @@ def _aggregate_over(
     # `spatial_neighbors` leaves float32, so a mean that is exactly representable at that width
     # still does not come back exact. Dividing by the signed sum rather than the L1 norm is also
     # the weighted mean a negative edge weight asks for.
-    total = np.asarray(fau_stats.sum(adj, axis=1, dtype=np.float64)).reshape(-1, 1)
+    if counted is None:
+        total = np.asarray(fau_stats.sum(adj, axis=1, dtype=np.float64)).reshape(-1, 1)
+    else:
+        total = np.asarray(adj @ counted.astype(np.float64)).reshape(-1, 1)
     inv = np.reciprocal(total, where=total != 0, out=np.zeros_like(total))  # an isolated row stays 0
 
     def mean_over(x: Array | CSBase) -> Array | CSBase:
@@ -1071,11 +1082,13 @@ def nhood_aggregate(
     by_hop: dict[int, CSBase | None] = {0: None}
     if max(hops) >= 1:
         by_hop |= dict(enumerate(_power_adjacencies(adata.obsp[connectivity_key], max(hops)), start=1))
-    if has_value is not None and not has_value.all():
-        keep = diags(has_value.astype(features.dtype))
-        by_hop = {hop: adj if adj is None else (adj @ keep).tocsr() for hop, adj in by_hop.items()}
+    # an unlabelled observation's one-hot row is zero, so it only has to leave the neighbor count;
+    # the hop matrices are not copied to drop it, and paths through it still reach past it
+    counted = None if has_value is None or has_value.all() else has_value
     # hop 0 is the observation itself, so it contributes its features unaggregated
-    blocks = [features if hop == 0 else _aggregate_over(by_hop[hop], features, aggregation) for hop in hops]
+    blocks = [
+        features if hop == 0 else _aggregate_over(by_hop[hop], features, aggregation, counted=counted) for hop in hops
+    ]
 
     # keep the container the features came in; `variance` has already densified, so a
     # mixed set of blocks has to be densified whole
