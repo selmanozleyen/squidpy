@@ -969,6 +969,7 @@ def _power_adjacencies(adj: CSBase, max_hop: int) -> list[CSBase]:
 
 def _onehot(labels: pd.Series) -> csr_matrix:
     """Indicator matrix of ``labels``, one column per category."""
+    # TODO: move to fast-array-utils; scanpy keeps its own private copy as `get._aggregated.sparse_indicator`
     cat = labels.astype("category")
     codes = cat.cat.codes.to_numpy()
     keep = codes >= 0
