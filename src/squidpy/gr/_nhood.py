@@ -868,7 +868,6 @@ def _bfs_shells(
     fill: bool,
 ) -> None:
     n = indptr.shape[0] - 1
-    # one chunk per thread, each with its own scratch row; the pool is whatever `numba_threads` set
     n_threads = get_num_threads()
     stamp = np.full((n_threads, n), -1, dtype=indices.dtype)
     queue = np.empty((n_threads, n), dtype=indices.dtype)
