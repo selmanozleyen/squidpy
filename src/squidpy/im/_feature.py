@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import pandas as pd
 from anndata import AnnData
 from scanpy import logging as logg
@@ -11,15 +12,18 @@ from scanpy import logging as logg
 from squidpy._compat import old_positionals
 from squidpy._constants._constants import ImageFeature
 from squidpy._docs import d, inject_docs
-from squidpy._utils import Signal, SigQueue, get_n_processes, parallelize
+from squidpy._utils import deprecated_params, get_n_numba_threads, thread_map
 from squidpy.gr._utils import _save_data
 from squidpy.im._container import ImageContainer
 
 __all__ = ["calculate_image_features"]
 
+_CHUNK_SIZE = 64
+
 
 @d.dedent
 @inject_docs(f=ImageFeature)
+@deprecated_params({"backend": "1.10.0"})
 @old_positionals(
     "img",
     "layer",
@@ -29,7 +33,6 @@ __all__ = ["calculate_image_features"]
     "key_added",
     "copy",
     "n_jobs",
-    "backend",
     "show_progress_bar",
 )
 def calculate_image_features(
@@ -43,7 +46,6 @@ def calculate_image_features(
     key_added: str = "img_features",
     copy: bool = False,
     n_jobs: int | None = None,
-    backend: str = "loky",
     show_progress_bar: bool = True,
     **kwargs: Any,
 ) -> pd.DataFrame | None:
@@ -76,7 +78,8 @@ def calculate_image_features(
     key_added
         Key in :attr:`anndata.AnnData.obsm` where to store the calculated features.
     %(copy)s
-    %(parallelize)s
+    %(n_jobs_threads)s
+    %(show_progress_bar)s
     kwargs
         Keyword arguments for :meth:`squidpy.im.ImageContainer.generate_spot_crops`.
 
@@ -98,24 +101,28 @@ def calculate_image_features(
         features = [features]
     features = sorted({ImageFeature(f).s for f in features})
 
-    n_jobs = get_n_processes(n_jobs)
-    start = logg.info(f"Calculating features `{list(features)}` using `{n_jobs}` core(s)")
+    n_jobs = get_n_numba_threads(n_jobs)
+    start = logg.info(f"Calculating features `{list(features)}` using `{n_jobs}` thread(s)")
 
-    res = parallelize(
-        _calculate_image_features_helper,
-        collection=adata.obs_names,
-        extractor=pd.concat,
-        n_jobs=n_jobs,
-        backend=backend,
-        show_progress_bar=show_progress_bar,
-    )(
-        adata=adata,
-        img=img,
-        layer=layer,
-        library_id=library_id,
-        features=features,
-        features_kwargs=features_kwargs,
-        **kwargs,
+    # chunks amortize the per-call `adata[obs_names]` view inside `generate_spot_crops`
+    chunks = np.array_split(adata.obs_names, -(-adata.n_obs // _CHUNK_SIZE))
+    res = pd.concat(
+        thread_map(
+            lambda obs_ids: _calculate_image_features_helper(
+                obs_ids,
+                adata=adata,
+                img=img,
+                layer=layer,
+                library_id=library_id,
+                features=features,
+                features_kwargs=features_kwargs,
+                **kwargs,
+            ),
+            chunks,
+            n_jobs=n_jobs,
+            show_progress_bar=show_progress_bar,
+            unit="chunk",
+        )
     )
 
     if copy:
@@ -134,7 +141,6 @@ def _calculate_image_features_helper(
     library_id: str | Sequence[str] | None,
     features: list[ImageFeature],
     features_kwargs: Mapping[str, Any],
-    queue: SigQueue | None = None,
     **kwargs: Any,
 ) -> pd.DataFrame:
     features_list = []
@@ -167,11 +173,5 @@ def _calculate_image_features_helper(
 
             features_dict.update(res)
         features_list.append(features_dict)
-
-        if queue is not None:
-            queue.put(Signal.UPDATE)
-
-    if queue is not None:
-        queue.put(Signal.FINISH)
 
     return pd.DataFrame(features_list, index=list(obs_ids))
