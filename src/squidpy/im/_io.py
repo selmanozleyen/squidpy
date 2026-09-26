@@ -10,7 +10,8 @@ from dask import delayed
 from PIL import Image
 from scanpy import logging as logg
 from skimage.io import imread
-from tifffile import TiffFile
+from tifffile import TiffFile, memmap
+from tifffile import imread as imread_tiff
 
 from squidpy._constants._constants import InferDimensions
 from squidpy._docs import inject_docs
@@ -212,6 +213,14 @@ def _infer_dimensions(
     raise ValueError(f"Expected the image to be either `2`, `3` or `4` dimensional, found `{ndim}`.")
 
 
+def _chunked_tiff(fname: str) -> da.Array:
+    """The TIFF's first series as a dask array that reads only the tiles or strips a slice touches."""
+    try:  # uncompressed contiguous data: the OS pages in exactly what a slice needs
+        return da.from_array(memmap(fname, mode="r"), chunks="auto", lock=False)
+    except ValueError:
+        return da.from_zarr(imread_tiff(fname, aszarr=True, series=0, level=0))
+
+
 def _lazy_load_image(
     fname: str | Path,
     dims: InferDimensions | tuple[str, ...] = InferDimensions.DEFAULT,
@@ -222,12 +231,6 @@ def _lazy_load_image(
         # not setting MAX_IMAGE_PIXELS causes problems when with processes and dask.distributed
         old_max_pixels = Image.MAX_IMAGE_PIXELS
         try:
-            if fname.endswith(".tif") or fname.endswith(".tiff"):
-                # do not use imread since it changes the shape to `y, x, ?, z`,
-                # whereas we use `z, y, x, ?` in `_infer_shape_dtype`
-                # return np.reshape(imread(fname, plugin="tifffile"), shape)
-                return np.reshape(TiffFile(fname).asarray(), shape)
-
             Image.MAX_IMAGE_PIXELS = None
             return np.reshape(imread(fname, plugin="pil"), shape)
         except Image.UnidentifiedImageError as e:  # should not happen
@@ -243,7 +246,10 @@ def _lazy_load_image(
     if isinstance(chunks, dict):
         chunks = tuple(chunks.get(d, "auto") for d in dims)  # type: ignore[union-attr]
 
-    darr = da.from_delayed(delayed(read_unprotected)(fname), shape=shape, dtype=dtype)
+    if fname.endswith((".tif", ".tiff")):
+        darr = _chunked_tiff(fname).reshape(shape)
+    else:
+        darr = da.from_delayed(delayed(read_unprotected)(fname), shape=shape, dtype=dtype)
     if chunks is not None:
         darr = darr.rechunk(chunks)
 

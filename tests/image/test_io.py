@@ -88,6 +88,17 @@ class TestIO:
                 np.testing.assert_array_equal(actual_dims, ["z", "y", "x", "channels"])
             np.testing.assert_array_equal(actual_shape, shape)
 
+    @pytest.mark.parametrize(
+        "layout", [{}, {"tile": (64, 64)}, {"compression": "zlib"}], ids=["memmap", "tiled", "zlib"]
+    )
+    def test_lazy_tiff_reads_the_same_pixels(self, layout: dict, tmpdir):
+        img = np.random.default_rng(0).integers(0, 255, (300, 200, 3), dtype=np.uint8)
+        path = str(tmpdir / "img.tif")
+        tifffile.imwrite(path, img, photometric="rgb", **layout)
+        res = _lazy_load_image(path)
+        np.testing.assert_array_equal(res.isel(z=0).values, img)
+        np.testing.assert_array_equal(res[40:90, 30:70].isel(z=0).values, img[40:90, 30:70])
+
     @pytest.mark.parametrize("chunks", [100, (1, 100, 100, 3), "auto", None, {"y": 100, "x": 100}])
     def test_lazy_load_image(self, chunks: int | tuple[int, ...] | str | dict[str, int] | None, tmpdir):
         path = str(tmpdir / "img.tiff")
