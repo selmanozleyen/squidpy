@@ -12,7 +12,7 @@ from scanpy import logging as logg
 from squidpy._compat import old_positionals
 from squidpy._constants._constants import ImageFeature
 from squidpy._docs import d, inject_docs
-from squidpy._utils import deprecated_params, get_n_numba_threads, thread_map
+from squidpy._utils import deprecated_params, get_n_processes, thread_map
 from squidpy.gr._utils import _save_data
 from squidpy.im._container import ImageContainer
 
@@ -23,7 +23,6 @@ _CHUNK_SIZE = 64
 
 @d.dedent
 @inject_docs(f=ImageFeature)
-@deprecated_params({"backend": "1.10.0"})
 @old_positionals(
     "img",
     "layer",
@@ -33,8 +32,10 @@ _CHUNK_SIZE = 64
     "key_added",
     "copy",
     "n_jobs",
+    "backend",
     "show_progress_bar",
 )
+@deprecated_params({"backend": "1.10.0"})
 def calculate_image_features(
     adata: AnnData,
     *,
@@ -78,7 +79,8 @@ def calculate_image_features(
     key_added
         Key in :attr:`anndata.AnnData.obsm` where to store the calculated features.
     %(copy)s
-    %(n_jobs_threads)s
+    %(n_jobs)s
+        Features run on a thread pool, so a ``'custom'`` function must be thread-safe when ``n_jobs != 1``.
     %(show_progress_bar)s
     kwargs
         Keyword arguments for :meth:`squidpy.im.ImageContainer.generate_spot_crops`.
@@ -101,7 +103,8 @@ def calculate_image_features(
         features = [features]
     features = sorted({ImageFeature(f).s for f in features})
 
-    n_jobs = get_n_numba_threads(n_jobs)
+    # serial by default: threads were slower than serial for the built-in summary/histogram features
+    n_jobs = get_n_processes(n_jobs)
     start = logg.info(f"Calculating features `{list(features)}` using `{n_jobs}` thread(s)")
 
     # chunks amortize the per-call `adata[obs_names]` view inside `generate_spot_crops`
