@@ -3,10 +3,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
+import dask
 import dask.array as da
 import numpy as np
 import xarray as xr
+import zarr
 from dask import delayed
+from dask.array.core import normalize_chunks
 from PIL import Image
 from scanpy import logging as logg
 from skimage.io import imread
@@ -213,12 +216,33 @@ def _infer_dimensions(
     raise ValueError(f"Expected the image to be either `2`, `3` or `4` dimensional, found `{ndim}`.")
 
 
+# ponytail: a crop decodes every chunk it touches (a few x 1 MiB, or whole tiles/strips when those are
+# bigger), and a 30 GB slide still gives ~30k chunks; raise it if graph size starts to dominate crop latency.
+_TIFF_CHUNK_SIZE = "1MiB"
+
+
 def _chunked_tiff(fname: str) -> da.Array:
-    """The TIFF's first series as a dask array that reads only the tiles or strips a slice touches."""
+    """The TIFF's first series as a dask array that reads only the tiles or strips a slice touches.
+
+    Compressed data is chunked to about ``_TIFF_CHUNK_SIZE``, rounded up to whole tiles or strips so that
+    no tile is decoded more than once per read. A crop is faster than the old whole-file
+    ``TiffFile.asarray`` (~3-4x for one row per strip), but a full read of a file with many small strips
+    or tiles is ~3-4x slower than it, since each strip or tile is fetched separately. A single-strip file
+    decodes whole, as before.
+    """
     try:  # uncompressed contiguous data: the OS pages in exactly what a slice needs
-        return da.from_array(memmap(fname, mode="r"), chunks="auto", lock=False)
+        # name=False: tokenizing the memmap hashes the whole file
+        arr = da.from_array(memmap(fname, mode="r"), chunks="auto", lock=False, name=False)
     except ValueError:
-        return da.from_zarr(imread_tiff(fname, aszarr=True, series=0, level=0))
+        # the reshape in `_lazy_load_image` stops dask from pushing a crop into the zarr read,
+        # so a crop decodes every chunk it touches: keep chunks small, but never split a tile or strip
+        z = zarr.open_array(imread_tiff(fname, aszarr=True, series=0, level=0), mode="r")
+        with dask.config.set({"array.chunk-size": _TIFF_CHUNK_SIZE}):
+            auto = normalize_chunks("auto", z.shape, dtype=z.dtype, previous_chunks=z.chunks)
+        chunks = tuple(min(-(-c[0] // t) * t, n) for c, t, n in zip(auto, z.chunks, z.shape, strict=True))
+        arr = da.from_zarr(z, chunks=chunks)
+    # numba rejects non-native byte order; TiffFile.asarray used to swap it on read
+    return arr if arr.dtype.isnative else arr.astype(arr.dtype.newbyteorder("="))
 
 
 def _lazy_load_image(
