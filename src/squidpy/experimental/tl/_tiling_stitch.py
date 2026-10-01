@@ -112,13 +112,6 @@ def _resolve_stitch_params(stitch_params: StitchParams | Mapping[str, Any] | Non
 _METHOD_KEY = "tiling_stitch"
 _STITCH_DEFAULTS = StitchParams()
 
-# Contract between calculate_tiling_qc and assign_stitch_groups.  _STITCH_COLUMNS
-# is the obs columns stitch writes back into the QC table; _STITCH_PARAM_KEYS
-# is the subset of top-level kwargs valid for re-running assign_stitch_groups
-# (the advanced tuning lives in a nested ``stitch_params`` dict).
-_STITCH_COLUMNS = ("stitch_group_id", "is_stitched", "n_pieces", "stitch_confidence")
-_STITCH_PARAM_KEYS = frozenset({"min_confidence", "max_gap", "max_group_size"})
-
 
 # Dataclasses
 
@@ -258,6 +251,7 @@ def _bbox_edge_run(
 def _extract_cut_edges(
     labels_da: xr.DataArray | np.ndarray,
     outlier_ids: Iterable[int],
+    *,
     bboxes: dict[int, tuple[int, int, int, int]] | None = None,
     distance_tol: float = _STITCH_DEFAULTS.distance_tol,
     min_edge_length: float = _STITCH_DEFAULTS.min_edge_length,
@@ -736,6 +730,7 @@ def _assemble_groups(
 
 def assign_stitch_groups(
     sdata: sd.SpatialData,
+    *,
     labels_key: str,
     qc_table_key: str | None = None,
     min_confidence: float = 0.7,
@@ -814,11 +809,6 @@ def assign_stitch_groups(
         raise ValueError(f"QC table '{table_key}' is missing 'is_outlier'; re-run calculate_tiling_qc.")
     if "label_id" not in adata.obs.columns:
         raise ValueError(f"QC table '{table_key}' is missing 'label_id'.")
-
-    existing = [c for c in _STITCH_COLUMNS if c in adata.obs.columns]
-    if existing:
-        logg.warning(f"Overwriting existing stitch columns: {existing}.")
-        adata.obs.drop(columns=existing, inplace=True)
 
     # Resolve which labels DataArray was used at QC time (multi-scale aware).
     qc_params = adata.uns.get("tiling_qc", {})
@@ -901,10 +891,12 @@ def assign_stitch_groups(
             pieces_dist[key] = pieces_dist.get(key, 0) + 1
 
     adata.uns[_METHOD_KEY] = {
-        "min_confidence": float(min_confidence),
-        "max_gap": float(max_gap),
-        "max_group_size": int(max_group_size),
-        "stitch_params": asdict(params),
+        "params": {
+            "min_confidence": float(min_confidence),
+            "max_gap": float(max_gap),
+            "max_group_size": int(max_group_size),
+            "stitch_params": asdict(params),
+        },
         "n_outliers": int(n_outliers),
         "n_candidate_pairs": int(len(pairs)),
         "n_stitched_groups": int(n_groups),
