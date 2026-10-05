@@ -3,14 +3,18 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
+import dask
 import dask.array as da
 import numpy as np
 import xarray as xr
+import zarr
 from dask import delayed
+from dask.array.core import normalize_chunks
 from PIL import Image
 from scanpy import logging as logg
 from skimage.io import imread
-from tifffile import TiffFile
+from tifffile import TiffFile, memmap
+from tifffile import imread as imread_tiff
 
 from squidpy._constants._constants import InferDimensions
 from squidpy._docs import inject_docs
@@ -212,6 +216,35 @@ def _infer_dimensions(
     raise ValueError(f"Expected the image to be either `2`, `3` or `4` dimensional, found `{ndim}`.")
 
 
+# ponytail: a crop decodes every chunk it touches (a few x 1 MiB, or whole tiles/strips when those are
+# bigger), and a 30 GB slide still gives ~30k chunks; raise it if graph size starts to dominate crop latency.
+_TIFF_CHUNK_SIZE = "1MiB"
+
+
+def _chunked_tiff(fname: str) -> da.Array:
+    """The TIFF's first series as a dask array that reads only the tiles or strips a slice touches.
+
+    Compressed data is chunked to about ``_TIFF_CHUNK_SIZE``, rounded up to whole tiles or strips so that
+    no tile is decoded more than once per read. A crop is faster than the old whole-file
+    ``TiffFile.asarray`` (~3-4x for one row per strip), but a full read of a file with many small strips
+    or tiles is ~3-4x slower than it, since each strip or tile is fetched separately. A single-strip file
+    decodes whole, as before.
+    """
+    try:  # uncompressed contiguous data: the OS pages in exactly what a slice needs
+        # name=False: tokenizing the memmap hashes the whole file
+        arr = da.from_array(memmap(fname, mode="r"), chunks="auto", lock=False, name=False)
+    except ValueError:
+        # the reshape in `_lazy_load_image` stops dask from pushing a crop into the zarr read,
+        # so a crop decodes every chunk it touches: keep chunks small, but never split a tile or strip
+        z = zarr.open_array(imread_tiff(fname, aszarr=True, series=0, level=0), mode="r")
+        with dask.config.set({"array.chunk-size": _TIFF_CHUNK_SIZE}):
+            auto = normalize_chunks("auto", z.shape, dtype=z.dtype, previous_chunks=z.chunks)
+        chunks = tuple(min(-(-c[0] // t) * t, n) for c, t, n in zip(auto, z.chunks, z.shape, strict=True))
+        arr = da.from_zarr(z, chunks=chunks)
+    # numba rejects non-native byte order; TiffFile.asarray used to swap it on read
+    return arr if arr.dtype.isnative else arr.astype(arr.dtype.newbyteorder("="))
+
+
 def _lazy_load_image(
     fname: str | Path,
     dims: InferDimensions | tuple[str, ...] = InferDimensions.DEFAULT,
@@ -222,12 +255,6 @@ def _lazy_load_image(
         # not setting MAX_IMAGE_PIXELS causes problems when with processes and dask.distributed
         old_max_pixels = Image.MAX_IMAGE_PIXELS
         try:
-            if fname.endswith(".tif") or fname.endswith(".tiff"):
-                # do not use imread since it changes the shape to `y, x, ?, z`,
-                # whereas we use `z, y, x, ?` in `_infer_shape_dtype`
-                # return np.reshape(imread(fname, plugin="tifffile"), shape)
-                return np.reshape(TiffFile(fname).asarray(), shape)
-
             Image.MAX_IMAGE_PIXELS = None
             return np.reshape(imread(fname, plugin="pil"), shape)
         except Image.UnidentifiedImageError as e:  # should not happen
@@ -243,7 +270,10 @@ def _lazy_load_image(
     if isinstance(chunks, dict):
         chunks = tuple(chunks.get(d, "auto") for d in dims)  # type: ignore[union-attr]
 
-    darr = da.from_delayed(delayed(read_unprotected)(fname), shape=shape, dtype=dtype)
+    if fname.endswith((".tif", ".tiff")):
+        darr = _chunked_tiff(fname).reshape(shape)
+    else:
+        darr = da.from_delayed(delayed(read_unprotected)(fname), shape=shape, dtype=dtype)
     if chunks is not None:
         darr = darr.rechunk(chunks)
 

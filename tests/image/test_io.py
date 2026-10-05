@@ -88,6 +88,43 @@ class TestIO:
                 np.testing.assert_array_equal(actual_dims, ["z", "y", "x", "channels"])
             np.testing.assert_array_equal(actual_shape, shape)
 
+    @pytest.mark.parametrize(
+        "layout", [{}, {"tile": (64, 64)}, {"compression": "zlib"}], ids=["memmap", "tiled", "zlib"]
+    )
+    def test_lazy_tiff_reads_the_same_pixels(self, layout: dict, tmpdir):
+        img = np.random.default_rng(0).integers(0, 255, (300, 200, 3), dtype=np.uint8)
+        path = str(tmpdir / "img.tif")
+        tifffile.imwrite(path, img, photometric="rgb", **layout)
+        res = _lazy_load_image(path)
+        assert res.data.npartitions == 1  # tiles and strips are merged, not one dask chunk each
+        np.testing.assert_array_equal(res.isel(z=0).values, img)
+        np.testing.assert_array_equal(res[40:90, 30:70].isel(z=0).values, img[40:90, 30:70])
+
+    @pytest.mark.parametrize(
+        ("layout", "block"),
+        [({"tile": (64, 64)}, (64, 64)), ({"rowsperstrip": 300}, (300, 200)), ({"rowsperstrip": 7}, (7, 200))],
+        ids=["tiled", "one_strip", "strips"],
+    )
+    def test_lazy_tiff_chunks_never_split_a_tile(self, layout: dict, block: tuple[int, int], tmpdir, monkeypatch):
+        monkeypatch.setattr("squidpy.im._io._TIFF_CHUNK_SIZE", "1KiB")  # smaller than any tile or strip here
+        img = np.random.default_rng(0).integers(0, 255, (300, 200, 3), dtype=np.uint8)
+        path = str(tmpdir / "img.tif")
+        tifffile.imwrite(path, img, photometric="rgb", compression="zlib", **layout)
+        res = _lazy_load_image(path)
+        for chunks, size in zip(res.data.chunks[:2], block, strict=True):
+            assert all(c % size == 0 for c in chunks[:-1]), chunks
+        np.testing.assert_array_equal(res[40:90, 30:70].isel(z=0).values, img[40:90, 30:70])
+
+    @pytest.mark.parametrize("layout", [{}, {"compression": "zlib"}], ids=["memmap", "zlib"])
+    def test_lazy_tiff_big_endian_is_native(self, layout: dict, tmpdir):
+        img = np.random.default_rng(0).random((50, 40)).astype(">f4")
+        path = str(tmpdir / "img.tif")
+        tifffile.imwrite(path, img, byteorder=">", **layout)
+        res = _lazy_load_image(path)
+        assert res.dtype == np.float32
+        assert res.dtype.isnative
+        np.testing.assert_array_equal(res.values[..., 0, 0], img)
+
     @pytest.mark.parametrize("chunks", [100, (1, 100, 100, 3), "auto", None, {"y": 100, "x": 100}])
     def test_lazy_load_image(self, chunks: int | tuple[int, ...] | str | dict[str, int] | None, tmpdir):
         path = str(tmpdir / "img.tiff")

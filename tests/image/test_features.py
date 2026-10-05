@@ -217,6 +217,31 @@ class TestHighLevel:
         np.testing.assert_array_equal(res.index, adata.obs_names)
         assert set(adata.obsm.keys()) == orig_keys
 
+    def test_n_jobs_none_is_serial(self, adata: AnnData, cont: ImageContainer):
+        """A ``custom`` function need not be thread-safe unless ``n_jobs`` asks for threads."""
+        import threading
+
+        threads = set()
+
+        def func(arr: np.ndarray) -> float:
+            threads.add(threading.get_ident())
+            return float(arr.mean())
+
+        calculate_image_features(
+            adata, img=cont, features="custom", features_kwargs={"custom": {"func": func}}, copy=True
+        )
+        assert threads == {threading.get_ident()}
+
+    def test_v183_positional_backend(self, adata: AnnData, cont: ImageContainer):
+        """A v1.8.3 positional call through ``backend`` binds every value and warns about ``backend``."""
+        expected = calculate_image_features(adata, img=cont, features="summary", copy=True, n_jobs=1)
+        with pytest.warns(FutureWarning) as record:
+            got = calculate_image_features(
+                adata, cont, None, None, "summary", {}, "img_features", True, 1, "loky", False
+            )
+        assert any("`backend`" in str(w.message) for w in record)
+        pd.testing.assert_frame_equal(got, expected)
+
     @pytest.mark.parametrize("n_jobs", [1, 2])
     def test_parallelize(self, adata: AnnData, cont: ImageContainer, n_jobs: int):
         features = ["texture", "summary", "histogram"]
