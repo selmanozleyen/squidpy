@@ -383,8 +383,8 @@ def _co_occurrence_helper(v_x: NDArrayA, v_y: NDArrayA, v_radium: NDArrayA, labs
 
 
 @d.dedent
-@deprecated_params({"n_splits": "1.10.0", "n_jobs": "1.10.0", "backend": "1.10.0", "show_progress_bar": "1.10.0"})
 @old_positionals("cluster_key", "spatial_key", "interval", "copy")
+@deprecated_params({"n_splits": "1.10.0", "n_jobs": "1.10.0", "backend": "1.10.0", "show_progress_bar": "1.10.0"})
 def co_occurrence(
     adata: AnnData | SpatialData,
     *,
@@ -425,8 +425,10 @@ def co_occurrence(
 
     spatial = adata.obsm[spatial_key].astype(fp)
     original_clust = adata.obs[cluster_key]
-    clust_map = {v: i for i, v in enumerate(original_clust.cat.categories.values)}
-    labs = np.array([clust_map[c] for c in original_clust], dtype=ip)
+    labs = original_clust.cat.codes.to_numpy().astype(ip)  # same mapping, without a per-cell loop
+    if (labs < 0).any():
+        # code -1 would index out of bounds in the kernel (the old per-cell dict raised KeyError)
+        raise ValueError(f"`adata.obs[{cluster_key!r}]` contains missing values.")
 
     # create intervals thresholds
     if isinstance(interval, int):
