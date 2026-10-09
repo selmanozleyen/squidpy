@@ -447,7 +447,14 @@ class PercentilePostprocessor:
     percentile: float
 
     def __call__(self, adj: csr_matrix, dst: csr_matrix) -> tuple[csr_matrix, csr_matrix]:
-        threshold = np.percentile(dst.data, self.percentile)
+        # Builders materialize the diagonal via `setdiag(0.0)`; those zeros are not edges and
+        # must not drag the threshold down. Read the row indices off `indptr` rather than
+        # dropping the entries, so `dst` keeps the sparsity structure it shares with `adj`.
+        rows = np.repeat(np.arange(dst.shape[0]), np.diff(dst.indptr))
+        edges = dst.data[rows != dst.indices]
+        if edges.size == 0:
+            return adj, dst
+        threshold = np.percentile(edges, self.percentile)
         adj[dst > threshold] = 0.0
         dst[dst > threshold] = 0.0
         return adj, dst
