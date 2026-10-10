@@ -97,11 +97,7 @@ def explicit_axes(value: Sequence[npt.ArrayLike], shape: tuple[int, ...], name: 
 def affine_xy_to_rc(
     matrix: npt.ArrayLike, *, name: str = "initial_affine", ndim: int = 2
 ) -> tuple[jax.Array, jax.Array]:
-    """Split a homogeneous ``(x, y[, z])`` affine into array-order ``(linear, translation)``.
-
-    See :func:`~squidpy.experimental.tl._align._stalign_impl._core.reverse_axes` for the
-    convention swap.
-    """
+    """Split a homogeneous ``(x, y[, z])`` affine into array-order ``(linear, translation)``."""
     dtype = jax_dtype()
     affine_xy = jnp.asarray(matrix, dtype=dtype)
     if affine_xy.shape != (ndim + 1, ndim + 1):

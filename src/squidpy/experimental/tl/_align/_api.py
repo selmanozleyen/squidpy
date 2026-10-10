@@ -1,23 +1,16 @@
 """The public alignment functions, built on the array-in / array-out estimators.
 
 Thin orchestrators: resolve the ``*_key`` arguments to in-memory arrays and call the
-estimator, which never sees a container. SpatialData transformation write-back lives in
-:mod:`._io`.
+estimator, which never sees a container.
 
-Fitting and writing are separate calls for STalign. A diffeomorphism has no SpatialData
-representation, so the fit cannot live in a container: it is the return value, and its
+STalign fits and writes in separate calls: a diffeomorphism has no SpatialData
+representation, so the fit is the return value and its
 :meth:`~squidpy.experimental.tl.StalignFit.transform` method writes.
-:func:`align_landmarks` fits and writes in one call, which its result being an affine, and
-so representable, makes honest.
+:func:`align_landmarks` does both in one call, its result being an affine.
 
-Writing takes ``inplace``, with the meaning scanpy gives it: ``inplace=False`` hands back
-what would have been written instead of writing it. A function that returns a fit takes no
-such flag: there is nothing to write yet, and ``copy`` in scanpy's sense (operate on a
-duplicated container) is a caller's ``.copy()`` away.
-
-``key_added`` always names a write target, defaulting to a conventional key the way
-scanpy's does: it is never the switch for whether to write. That is ``inplace``'s job,
-and one flag with one meaning beats two spellings of the same thing.
+``inplace=False`` hands back what would have been written, as in scanpy; a function
+returning a fit takes no such flag. ``key_added`` always names the write target, never
+whether to write.
 """
 
 from __future__ import annotations
