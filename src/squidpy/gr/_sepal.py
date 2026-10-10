@@ -239,6 +239,10 @@ def _diffusion(  # noqa: PLR0917, numba requires positional arguments
     Written as plain loops so that an iteration allocates nothing: the kernel runs up to ``n_iter``
     iterations per gene, and per-iteration temporaries made it allocation-bound and kept threads from
     scaling. Each iteration still computes every Laplacian from the previous state before updating.
+
+    Stencils and entropy follow https://github.com/almaan/sepal/blob/master/sepal/models.py; the
+    hexagonal 7-point stencil is from Benster, Kantorovich & Krylov, *Approximate Methods of Higher
+    Analysis* (ISBN 978-0486821603), the rectangular one is the 5-point stencil.
     """
     n_sat, n_nbrs = sat_idx.shape
     eps = np.finfo(np.float64).eps
