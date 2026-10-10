@@ -547,10 +547,9 @@ def align_landmarks(
         )
 
     if not isinstance(data_ref, AnnData | SpatialData):
-        # The landmarks themselves, not containers holding them. There is no key to address
-        # and nothing to write into, so this returns the matrix and refuses the arguments that
-        # only mean something for a container rather than silently ignoring them.
-        # `fit_landmarks` validates the pair, so nothing is re-checked here.
+        # The landmarks themselves, not containers holding them: there is no key to address
+        # and nothing to write into, so this returns the matrix and refuses the container-only
+        # arguments. `fit_landmarks` validates the pair, so nothing is re-checked here.
         if data_query is None:
             raise ValueError(
                 "`data_ref` is an array of landmarks, so `data_query` must be the matching "
@@ -583,9 +582,9 @@ def align_landmarks(
     )
 
     if key_added is not None and isinstance(query_container, SpatialData) and query_table is None:
-        # `key_added` writes to a table's `obsm`, and `table_key` is what names that table. But
-        # it also moves the landmark read into that table's `obsm`, so shapes-element landmarks
-        # can never be combined with `key_added`. Say so, rather than asking for `table_key`.
+        # `key_added` writes to a table's `obsm`, named by `table_key`. But `table_key` also
+        # moves the landmark read into that table's `obsm`, so shapes-element landmarks can
+        # never be combined with `key_added`.
         raise ValueError(
             "`key_added` writes into a table's `obsm`, so it needs `table_key`, which also reads the "
             "landmarks from that table. With the landmarks in shapes elements, use "
