@@ -234,91 +234,54 @@ def _diffusion(  # noqa: PLR0917, numba requires positional arguments
     dt: float,
     thresh: float,
 ) -> float:
-    """Simulate diffusion process on a regular graph."""
-    sat_shape = sat.shape[0]
-    n_cells = conc.shape[0]
-    entropy_arr = np.zeros(n_iter)
-    nhood = np.zeros(sat_shape)
-    dcdt = np.zeros(n_cells)
+    """Simulate diffusion process on a regular graph; return the iteration the entropy settled at.
+
+    Written as plain loops so that an iteration allocates nothing: the kernel runs up to ``n_iter``
+    iterations per gene, and per-iteration temporaries made it allocation-bound and kept threads from
+    scaling. Each iteration still computes every Laplacian from the previous state before updating.
+    """
+    n_sat, n_nbrs = sat_idx.shape
+    eps = np.finfo(np.float64).eps
+    d2 = np.empty(n_sat)
+    dcdt = np.zeros(conc.shape[0])  # only saturated entries are ever written or read
     prev_ent = 1.0
 
     for i in range(n_iter):
-        for j in range(sat_shape):
-            nhood[j] = np.sum(conc[sat_idx[j]])
-        if use_hex:
-            d2 = _laplacian_hex(conc[sat], nhood)
-        else:
-            d2 = _laplacian_rect(conc[sat], nhood)
+        # discrete Laplacian at every saturated node: 7-point stencil (hex) or 5-point (rect)
+        for j in range(n_sat):
+            nbrs = 0.0
+            for m in range(n_nbrs):
+                nbrs += conc[sat_idx[j, m]]
+            c = conc[sat[j]]
+            d2[j] = (2.0 * nbrs - 12.0 * c) / 3.0 if use_hex else nbrs - 4.0 * c
+        for j in range(n_sat):
+            dcdt[sat[j]] = d2[j]
+            conc[sat[j]] += d2[j] * dt
+        # unsaturated (border) nodes follow their nearest saturated node
+        for u in range(unsat.shape[0]):
+            conc[unsat[u]] += dcdt[unsat_idx[u]] * dt
+        for k in range(conc.shape[0]):
+            if conc[k] < 0:
+                conc[k] = 0.0
 
-        dcdt[:] = 0.0
-        dcdt[sat] = d2
-        conc[sat] += dcdt[sat] * dt
-        conc[unsat] += dcdt[unsat_idx] * dt
-        # set values below zero to 0
-        conc[conc < 0] = 0
-        # compute entropy
-        ent = _entropy(conc[sat]) / sat_shape
-        entropy_arr[i] = np.abs(ent - prev_ent)  # estimate entropy difference
+        # Shannon entropy (nats) of the saturated nodes' normalized concentrations; p = 0 adds 0
+        xs = 0.0
+        for j in range(n_sat):
+            if conc[sat[j]] > 0:
+                xs += conc[sat[j]]
+        ent = 0.0
+        if xs >= eps:
+            for j in range(n_sat):
+                x = conc[sat[j]]
+                if x > 0:
+                    xn = x / xs
+                    ent -= np.log(max(xn, eps)) * xn
+        ent /= n_sat
+        if np.abs(ent - prev_ent) <= thresh:
+            return float(i)
         prev_ent = ent
-        if entropy_arr[i] <= thresh:
-            break
 
-    tmp = np.nonzero(entropy_arr <= thresh)[0]
-    return float(tmp[0] if len(tmp) else np.nan)
-
-
-# taken from https://github.com/almaan/sepal/blob/master/sepal/models.py
-@njit(parallel=False, fastmath=True)
-def _laplacian_rect(
-    centers: NDArrayA,
-    nbrs: NDArrayA,
-) -> NDArrayA:
-    """
-    Five point stencil approximation on rectilinear grid.
-
-    See `Wikipedia <https://en.wikipedia.org/wiki/Five-point_stencil>`_ for more information.
-    """
-    d2f: NDArrayA = nbrs - 4 * centers
-    return d2f
-
-
-# taken from https://github.com/almaan/sepal/blob/master/sepal/models.py
-@njit(fastmath=True)
-def _laplacian_hex(
-    centers: NDArrayA,
-    nbrs: NDArrayA,
-) -> NDArrayA:
-    """
-    Seven point stencil approximation on hexagonal grid.
-
-    References
-    ----------
-    Approximate Methods of Higher Analysis,
-    Curtis D. Benster, L.V. Kantorovich, V.I. Krylov,
-    ISBN-13: 978-0486821603.
-    """
-    d2f: NDArrayA = (2.0 * nbrs - 12.0 * centers) / 3.0
-    return d2f
-
-
-# taken from https://github.com/almaan/sepal/blob/master/sepal/models.py
-@njit(fastmath=True)
-def _entropy(
-    xx: NDArrayA,
-) -> float:
-    """Compute Shannon entropy of an array of probability values (in nats)."""
-    xnz = xx[xx > 0]
-    xs: np.float64 = np.sum(xnz)
-    eps = np.finfo(np.float64).eps  # ~2.22e-16
-    if xs < eps:
-        # 0 because
-        # xn represents probabilities
-        # and p(x)=0 is taken as 0 entropy
-        # see https://stats.stackexchange.com/a/433096
-        return 0.0
-    xn = xnz / xs
-    xl = np.log(np.maximum(xn, eps))
-    return float((-xl * xn).sum())
+    return np.nan
 
 
 def _compute_idxs(
