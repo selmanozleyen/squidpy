@@ -50,15 +50,11 @@ def _check_direction(value: object) -> Literal["forward", "backward"]:
 class StalignFit:
     """A fitted STalign diffeomorphism.
 
-    The base of the three concrete fits:
-    :class:`~squidpy.experimental.tl.StalignObsFit`,
+    The base of :class:`~squidpy.experimental.tl.StalignObsFit`,
     :class:`~squidpy.experimental.tl.StalignImageFit` and
     :class:`~squidpy.experimental.tl.StalignVolumeFit`, one per ``stalign_align_*`` entry
-    point. What a fit can do follows from what it was fitted from, so the frame-dependent
-    operations live on the subclasses that carry a frame rather than raising at runtime on
-    the ones that do not. Public in its own right: :meth:`from_uns` is a classmethod on it,
-    and it is the type to annotate "any fit" with.
-
+    point; frame-dependent operations live on the subclasses that carry a frame. Use it to
+    annotate any fit, and for the :meth:`from_uns` classmethod.
     """
 
     #: Homogeneous affine in the solver's row-column order, ``(3, 3)`` at rank 2,
@@ -506,11 +502,7 @@ def fit_stalign_volume(
 
 
 def _require_jax() -> None:
-    """Fail with an actionable message rather than a bare ImportError on the optional extra.
-
-    Called at the top of each fit function: JAX is imported inside them, not at module
-    scope, so ``import squidpy.experimental`` stays cheap and installable without it.
-    """
+    """Fail with an actionable message rather than a bare ImportError on the optional extra."""
     try:
         import jax  # noqa: F401
     except ImportError as e:
@@ -524,10 +516,9 @@ def _initial_affine_and_landmarks(
 ) -> tuple[JaxArray, JaxArray, JaxArray | None, JaxArray | None]:
     """Resolve the starting affine and the row-col landmark pair the point term uses.
 
-    Shared by the point-cloud and image paths: they differ in what they rasterize, not in
-    the landmark contract. Landmarks are ``(x, y)``, matched by row order, and in the same
-    units as the fit's coordinates: cell coordinates for a point-cloud fit, the images'
-    physical axes for an image fit.
+    Landmarks are ``(x, y)``, matched by row order, and in the same units as the fit's
+    coordinates: cell coordinates for a point-cloud fit, the images' physical axes for an
+    image fit.
 
     The two initialisers are not exclusive. Landmarks play two roles: they always
     contribute the point-matching term the solver weights by ``sigmaP``, and they *also*

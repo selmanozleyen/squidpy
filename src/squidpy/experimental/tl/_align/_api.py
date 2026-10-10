@@ -347,9 +347,7 @@ def _element_axes(
 ) -> list[np.ndarray]:
     """Physical axes of an image element, read off its transformation.
 
-    The scale and translation the element carries into ``coordinate_system`` are what put
-    it in physical units, so the fit reads them rather than taking a ``*_scale`` argument
-    that could disagree with the container. Axis order matches the array's spatial axes.
+    Axis order matches the array's spatial axes.
     """
     from spatialdata.transformations import get_transformation
 
@@ -377,12 +375,9 @@ def _assert_table_coords_share_frame(
 ) -> None:
     """Refuse to transform ``obsm`` coordinates that are not in ``coordinate_system``.
 
-    The fit's units come from the image element's transformation, so the coordinates it is
-    applied to have to be in that same system. A table's ``obsm`` sits in the intrinsic
-    frame of the element it annotates, which only coincides when that element's transform
-    into ``coordinate_system`` is the identity. Checked rather than silently applied: the
-    result is plausible reference coordinates that are simply wrong, with nothing to
-    reveal it.
+    A table's ``obsm`` sits in the intrinsic frame of the element it annotates, which
+    coincides with ``coordinate_system`` only when that element's transform into it is the
+    identity. Otherwise the result is plausible but wrong coordinates.
     """
     from spatialdata.transformations import get_transformation
 
@@ -687,10 +682,7 @@ def _read_landmarks(
 def _coordinate_system_of(sdata: SpatialData, *, element: str, side: str) -> str:
     """The coordinate system the shapes element is annotated in.
 
-    Everything registered to it moves with the fit, so it has to be unambiguous.
-    Reading it off the element rather than taking it as an argument keeps the call site
-    to the ``*_key`` arguments, and it is the same element the user picked the
-    landmarks on.
+    Raises if it is ambiguous: everything registered to it moves with the fit.
     """
     from spatialdata.transformations import get_transformation
 
