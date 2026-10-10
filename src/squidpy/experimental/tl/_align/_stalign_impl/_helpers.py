@@ -99,9 +99,8 @@ def affine_xy_to_rc(
 ) -> tuple[jax.Array, jax.Array]:
     """Split a homogeneous ``(x, y[, z])`` affine into array-order ``(linear, translation)``.
 
-    The solver works in array order (``(y, x)`` at rank 2, ``(z, y, x)`` at rank 3)
-    so conjugating by the axis reversal converts the caller's convention without them
-    having to think in the solver's.
+    See :func:`~squidpy.experimental.tl._align._stalign_impl._core.reverse_axes` for the
+    convention swap.
     """
     dtype = jax_dtype()
     affine_xy = jnp.asarray(matrix, dtype=dtype)
