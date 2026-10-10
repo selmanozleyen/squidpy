@@ -9,11 +9,12 @@ import numba.types as nt
 import numpy as np
 import pandas as pd
 from anndata import AnnData
-from numba import njit, prange
+from numba import njit
 from scanpy import logging as logg
 from scanpy.metrics import gearys_c, morans_i
 from scipy import stats
 from scipy.sparse import spmatrix
+from scipy.spatial import cKDTree
 from sklearn.metrics import pairwise_distances
 from sklearn.preprocessing import normalize
 from spatialdata import SpatialData
@@ -31,8 +32,10 @@ from squidpy._utils import (
     SigQueue,
     deprecated_params,
     deprecated_randomness_param,
+    get_n_numba_threads,
     get_n_processes,
     parallelize,
+    thread_map,
 )
 from squidpy._validators import assert_key_in_adata, assert_positive
 from squidpy.gr._utils import (
@@ -304,49 +307,52 @@ def _score_helper(
     return score_perms
 
 
-@njit(parallel=True, fastmath=True, cache=True)
-def _occur_count(  # noqa: PLR0917, numba requires positional arguments
-    spatial_x: NDArrayA, spatial_y: NDArrayA, thresholds: NDArrayA, label_idx: NDArrayA, n: int, k: int, l_val: int
-) -> NDArrayA:
-    # Allocate a 2D array to store a flat local result per point.
-    k2 = k * k
-    local_results = np.zeros((n, l_val * k2), dtype=np.int32)
+def _occur_count(spatial: NDArrayA, thresholds: NDArrayA, labs: NDArrayA, k: int) -> NDArrayA:
+    """Count ordered pairs ``i != j`` with ``|x_i - x_j| <= thresholds[r]``, per label pair and threshold.
 
-    for i in prange(n):
-        for j in range(n):
-            if i == j:
-                continue
-            dx = spatial_x[i] - spatial_x[j]
-            dy = spatial_y[i] - spatial_y[j]
-            d2 = dx * dx + dy * dy
-
-            pair = label_idx[i] * k + label_idx[j]  # fixed in r-loop
-            base = pair * l_val  # first cell for that pair
-
-            for r in range(l_val):
-                if d2 <= thresholds[r]:
-                    local_results[i][base + r] += 1
-
-    # reduction and reshape stay the same
-    result_flat = local_results.sum(axis=0)
-    result: NDArrayA = result_flat.reshape(k, k, l_val)
-
-    return result
-
-
-@njit(parallel=True, fastmath=True, cache=True)
-def _co_occurrence_helper(v_x: NDArrayA, v_y: NDArrayA, v_radium: NDArrayA, labs: NDArrayA) -> NDArrayA:
+    One KD-tree per label and dual-tree counting (:meth:`scipy.spatial.cKDTree.count_neighbors`):
+    memory stays linear in the number of points, and groups of points entirely within, or entirely
+    beyond, a radius are counted at once instead of pair by pair. Label pairs run in parallel threads.
     """
-    Fast co-occurrence probability computation using the new numba-accelerated counting.
+    trees = [cKDTree(spatial[labs == c]) for c in range(k)]
+    pairs = [(a, b) for a in range(k) for b in range(a, k)]  # counts are symmetric in the label pair
+
+    def count(pair: tuple[int, int]) -> NDArrayA:
+        a, b = pair
+        c = trees[a].count_neighbors(trees[b], thresholds, cumulative=True)
+        return c - trees[a].n if a == b else c  # each point is at distance 0 from itself
+
+    counts = np.zeros((k, k, len(thresholds)), dtype=np.int64)
+    for (a, b), c in zip(pairs, thread_map(count, pairs, n_jobs=get_n_numba_threads(None)), strict=True):
+        counts[a, b] = counts[b, a] = c
+    return counts
+
+
+@njit(cache=True)
+def _occur_prob(counts: NDArrayA) -> NDArrayA:
+    k, _, l_val = counts.shape
+    occ_prob = np.zeros((k, k, l_val), dtype=np.float64)
+    row_sums = counts.sum(axis=0)
+    totals = row_sums.sum(axis=0)
+    for r in range(l_val):
+        probs = row_sums[:, r] / totals[r]
+        for c in range(k):
+            for i in range(k):
+                if probs[i] != 0.0 and row_sums[c, r] != 0.0:
+                    occ_prob[i, c, r] = (counts[c, i, r] / row_sums[c, r]) / probs[i]
+    return occ_prob
+
+
+def _co_occurrence_helper(spatial: NDArrayA, v_radium: NDArrayA, labs: NDArrayA) -> NDArrayA:
+    """
+    Co-occurrence probabilities of every label pair at every distance threshold.
 
     Parameters
     ----------
-    v_x : np.ndarray, float64
-         x-coordinates.
-    v_y : np.ndarray, float64
-         y-coordinates.
+    spatial : np.ndarray, float64
+         ``(n, 2)`` coordinates.
     v_radium : np.ndarray, float64
-         Distance thresholds (in ascending order).
+         Distance thresholds (in ascending order); the first one only opens the first bin.
     labs : np.ndarray
          Cluster labels (as integers).
 
@@ -354,32 +360,12 @@ def _co_occurrence_helper(v_x: NDArrayA, v_y: NDArrayA, v_radium: NDArrayA, labs
     -------
     occ_prob : np.ndarray
          A 3D array of shape (k, k, len(v_radium)-1) containing the co-occurrence probabilities.
-    labs_unique : np.ndarray
-         Array of unique labels.
     """
-    n = len(v_x)
-    labs_unique = np.unique(labs)
-    k = len(labs_unique)
-    # l_val is the number of bins; here we assume the thresholds come from v_radium[1:].
-    l_val = len(v_radium) - 1
-    # Compute squared thresholds from the interval (skip the first value)
-    thresholds = (v_radium[1:]) ** 2
-
-    # Compute co-occurence counts.
-    counts = _occur_count(v_x, v_y, thresholds, labs, n, k, l_val)
-
-    occ_prob = np.zeros((k, k, l_val), dtype=np.float64)
-    row_sums = counts.sum(axis=0)
-    totals = row_sums.sum(axis=0)
-
-    for r in prange(l_val):
-        probs = row_sums[:, r] / totals[r]
-        for c in range(k):
-            for i in range(k):
-                if probs[i] != 0.0 and row_sums[c, r] != 0.0:
-                    occ_prob[i, c, r] = (counts[c, i, r] / row_sums[c, r]) / probs[i]
-
-    return occ_prob
+    # labels as 0..k-1 over the labels present: the shape the previous kernel produced, without
+    # indexing past k when a category is unused
+    _, labs = np.unique(labs, return_inverse=True)
+    k = int(labs.max()) + 1
+    return _occur_prob(_occur_count(spatial, v_radium[1:], labs, k))
 
 
 @d.dedent
@@ -439,11 +425,7 @@ def co_occurrence(
     if len(interval) <= 1:
         raise ValueError(f"Expected interval to be of length `>= 2`, found `{len(interval)}`.")
 
-    spatial_x = spatial[:, 0]
-    spatial_y = spatial[:, 1]
-
-    # Compute co-occurrence probabilities using the fast numba routine.
-    out = _co_occurrence_helper(spatial_x, spatial_y, interval, labs)
+    out = _co_occurrence_helper(spatial[:, :2], interval, labs)
     start = logg.info(f"Calculating co-occurrence probabilities for `{len(interval)}` intervals")
 
     if copy:
