@@ -334,13 +334,15 @@ def _ppp(
         while i_obs < n_observations:
             need = n_observations - i_obs
             state = rng.bit_generator.state
-            u = rng.random(2 * max(64, int(need / accept * 1.2) + 16))
-            xy = np.column_stack((bbox[0] + (bbox[2] - bbox[0]) * u[0::2], bbox[1] + (bbox[3] - bbox[1]) * u[1::2]))
+            m = max(64, int(need / accept * 1.2) + 16)
+            # `uniform` itself, with x/y bounds interleaved: the same routine (and rounding) as the
+            # scalar calls, consuming one draw per value in the same order
+            xy = rng.uniform(np.tile(bbox[:2], m), np.tile(bbox[2:], m)).reshape(m, 2)
             hits = np.flatnonzero(deln.find_simplex(xy) >= 0)
             if len(hits) >= need:
                 hits = hits[:need]
                 rng.bit_generator.state = state  # rewind, then consume only the draws that were used
-                rng.random(2 * (int(hits[-1]) + 1))
+                rng.random(2 * (int(hits[-1]) + 1))  # `uniform` consumes one double per value too
             result[i_sim, i_obs : i_obs + len(hits)] = xy[hits]
             i_obs += len(hits)
 
