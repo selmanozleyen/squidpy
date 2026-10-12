@@ -252,10 +252,11 @@ def _diffusion(  # noqa: PLR0917, numba requires positional arguments
     """Simulate diffusion on a regular graph for a ``(spots, genes)`` block, modified in place.
 
     Returns, per gene, the step at which the entropy settled (NaN if it did not within ``n_iter``).
-    Each step computes every Laplacian from the previous state before updating. The heavy loops run
-    in parallel over spots; the two entropy sums per gene stay sequential in spot order (parallel
-    over genes only), so a gene gives the same result alone or in any block. Nothing is allocated
-    per step.
+    Each step computes every Laplacian from the previous state before updating. Everything runs in
+    parallel over spots, the two entropy sums too: they add fixed-size chunks of spots in parallel
+    and then the chunk partials in chunk order, so the result depends on the grid only, never on the
+    thread count or the block a gene is in. On a grid of at most one chunk (any regular Visium slide)
+    that is the plain sequential sum. Nothing is allocated per step.
 
     Stencils and entropy follow https://github.com/almaan/sepal/blob/master/sepal/models.py; the
     hexagonal 7-point stencil is from Benster, Kantorovich & Krylov, *Approximate Methods of Higher
@@ -267,6 +268,9 @@ def _diffusion(  # noqa: PLR0917, numba requires positional arguments
     work = np.empty((n_sat, n_genes))  # Laplacian, later the entropy terms
     dcdt = np.zeros((n_spots, n_genes))  # only saturated rows are ever written or read
     xs = np.empty(n_genes)
+    chunk = max(16384, -(-n_sat // 1024))  # at most 1024 partial sums, set by the grid alone
+    n_chunks = -(-n_sat // chunk)
+    partial = np.empty((n_chunks, n_genes))
     prev_ent = np.ones(n_genes)
     active = np.ones(n_genes, dtype=np.bool_)
     settled = np.full(n_genes, np.nan)
@@ -296,27 +300,35 @@ def _diffusion(  # noqa: PLR0917, numba requires positional arguments
                 if active[g] and conc[k, g] < 0:
                     conc[k, g] = 0.0
 
-        # Shannon entropy (nats) of the saturated nodes' normalized concentrations; p = 0 adds 0
-        for g in prange(n_genes):
-            if active[g]:
-                total = 0.0
-                for j in range(n_sat):  # sequential: the same summation order as one gene alone
-                    if conc[sat[j], g] > 0:
-                        total += conc[sat[j], g]
-                xs[g] = total
-        for j in prange(n_sat):
+        # Shannon entropy (nats) of the saturated nodes' normalized concentrations; p = 0 adds 0.
+        # total mass per gene: chunk partials in parallel, then added in chunk order
+        for b in prange(n_chunks):
             for g in range(n_genes):
-                x = conc[sat[j], g]
-                if active[g] and x > 0 and xs[g] >= eps:
-                    xn = x / xs[g]
-                    work[j, g] = np.log(max(xn, eps)) * xn
+                partial[b, g] = 0.0
+            for j in range(b * chunk, min(n_sat, (b + 1) * chunk)):
+                for g in range(n_genes):
+                    x = conc[sat[j], g]
+                    if active[g] and x > 0:
+                        partial[b, g] += x
+        for g in range(n_genes):
+            xs[g] = 0.0
+            for b in range(n_chunks):
+                xs[g] += partial[b, g]
+        # -sum p log p, the same way
+        for b in prange(n_chunks):
+            for g in range(n_genes):
+                partial[b, g] = 0.0
+            for j in range(b * chunk, min(n_sat, (b + 1) * chunk)):
+                for g in range(n_genes):
+                    x = conc[sat[j], g]
+                    if active[g] and x > 0 and xs[g] >= eps:
+                        xn = x / xs[g]
+                        partial[b, g] -= np.log(max(xn, eps)) * xn
         for g in prange(n_genes):
             if active[g]:
                 ent = 0.0
-                if xs[g] >= eps:
-                    for j in range(n_sat):  # sequential, as above
-                        if conc[sat[j], g] > 0:
-                            ent -= work[j, g]
+                for b in range(n_chunks):
+                    ent += partial[b, g]
                 ent /= n_sat
                 if np.abs(ent - prev_ent[g]) <= thresh:
                     settled[g] = i
