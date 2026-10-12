@@ -3,20 +3,22 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Literal
 
+import numba
 import numpy as np
 import pandas as pd
 from anndata import AnnData
-from numba import njit
+from numba import njit, prange
 from scanpy import logging as logg
 from scipy.sparse import csc_matrix, csr_matrix, issparse, isspmatrix_csr, spmatrix
 from scipy.spatial import cKDTree
 from sklearn.metrics import pairwise_distances
 from spatialdata import SpatialData
+from tqdm.auto import tqdm
 
 from squidpy._compat import old_positionals
 from squidpy._constants._pkg_constants import Key
 from squidpy._docs import d, inject_docs
-from squidpy._utils import NDArrayA, deprecated_params, get_n_numba_threads, thread_map
+from squidpy._utils import NDArrayA, deprecated_params, get_n_numba_threads
 from squidpy._validators import assert_non_empty_sequence
 from squidpy.gr._utils import (
     _assert_connectivity_key,
@@ -177,6 +179,12 @@ def sepal(
     _save_data(adata, attr="uns", key=key_added, data=sepal_score, time=start)
 
 
+# Working memory per block of genes: the concentrations, their change and a per-spot scratch array,
+# 8 bytes each per spot and gene. About 4 GB keeps ~20 genes together on a 2 um Visium HD grid
+# (8.7M spots) and every gene of a regular Visium slide.
+_BLOCK_BYTES = 4 * 2**30
+
+
 def _diffusion_genes(
     vals: NDArrayA | spmatrix,
     *,
@@ -191,39 +199,32 @@ def _diffusion_genes(
     n_jobs: int,
     show_progress_bar: bool = True,
 ) -> NDArrayA:
-    """Run diffusion for each gene column, parallelised across threads."""
+    """Run the diffusion for every gene column, a block of genes at a time.
 
-    sparse = issparse(vals)
-
-    def _process_gene(i: int) -> float:
-        if sparse:
-            conc = np.ascontiguousarray(vals[:, i].toarray().ravel(), dtype=np.float64)
-        else:
-            conc = np.ascontiguousarray(vals[:, i], dtype=np.float64)
-        time_iter = _diffusion(
-            conc,
-            use_hex,
-            n_iter,
-            sat,
-            sat_idx,
-            unsat,
-            unsat_idx,
-            dt,
-            thresh,
-        )
-        return dt * time_iter
-
-    scores = thread_map(
-        _process_gene,
-        range(vals.shape[1]),
-        n_jobs=n_jobs,
-        show_progress_bar=show_progress_bar,
-        unit="gene",
-    )
-    return np.array(scores)
+    A block is a ``(spots, genes)`` array advanced together: a spot's neighbour reads fetch a
+    contiguous row of genes and share one index lookup, and every step runs in parallel over spots,
+    so all threads work even with fewer genes than threads. Each gene still does exactly the
+    arithmetic of a run on its own and stops at its own step.
+    """
+    n_spots, n_genes = vals.shape
+    block = int(max(1, min(n_genes, _BLOCK_BYTES // (24 * n_spots))))
+    scores = np.empty(n_genes)
+    prev_threads = numba.get_num_threads()
+    numba.set_num_threads(n_jobs)
+    try:
+        with tqdm(total=n_genes, unit="gene", disable=not show_progress_bar) as pbar:
+            for start in range(0, n_genes, block):
+                cols = vals[:, start : start + block]
+                conc = np.ascontiguousarray(cols.toarray() if issparse(cols) else cols, dtype=np.float64)
+                steps = _diffusion(conc, use_hex, n_iter, sat, sat_idx, unsat, unsat_idx, dt, thresh)
+                scores[start : start + block] = dt * steps
+                pbar.update(conc.shape[1])
+    finally:
+        numba.set_num_threads(prev_threads)
+    return scores
 
 
-@njit(fastmath=True, nogil=True)
+@njit(parallel=True, fastmath=True, nogil=True)
 def _diffusion(  # noqa: PLR0917, numba requires positional arguments
     conc: NDArrayA,
     use_hex: bool,
@@ -234,59 +235,84 @@ def _diffusion(  # noqa: PLR0917, numba requires positional arguments
     unsat_idx: NDArrayA,
     dt: float,
     thresh: float,
-) -> float:
-    """Simulate diffusion process on a regular graph; return the iteration the entropy settled at.
+) -> NDArrayA:
+    """Simulate diffusion on a regular graph for a ``(spots, genes)`` block, modified in place.
 
-    Written as plain loops so that an iteration allocates nothing: the kernel runs up to ``n_iter``
-    iterations per gene, and per-iteration temporaries made it allocation-bound and kept threads from
-    scaling. Each iteration still computes every Laplacian from the previous state before updating.
+    Returns, per gene, the step at which the entropy settled (NaN if it did not within ``n_iter``).
+    Each step computes every Laplacian from the previous state before updating. The heavy loops run
+    in parallel over spots; the two entropy sums per gene stay sequential in spot order (parallel
+    over genes only), so a gene gives the same result alone or in any block. Nothing is allocated
+    per step.
 
     Stencils and entropy follow https://github.com/almaan/sepal/blob/master/sepal/models.py; the
     hexagonal 7-point stencil is from Benster, Kantorovich & Krylov, *Approximate Methods of Higher
     Analysis* (ISBN 978-0486821603), the rectangular one is the 5-point stencil.
     """
+    n_spots, n_genes = conc.shape
     n_sat, n_nbrs = sat_idx.shape
     eps = np.finfo(np.float64).eps
-    d2 = np.empty(n_sat)
-    dcdt = np.zeros(conc.shape[0])  # only saturated entries are ever written or read
-    prev_ent = 1.0
+    work = np.empty((n_sat, n_genes))  # Laplacian, later the entropy terms
+    dcdt = np.zeros((n_spots, n_genes))  # only saturated rows are ever written or read
+    xs = np.empty(n_genes)
+    prev_ent = np.ones(n_genes)
+    active = np.ones(n_genes, dtype=np.bool_)
+    settled = np.full(n_genes, np.nan)
 
     for i in range(n_iter):
         # discrete Laplacian at every saturated node: 7-point stencil (hex) or 5-point (rect)
-        for j in range(n_sat):
-            nbrs = 0.0
-            for m in range(n_nbrs):
-                nbrs += conc[sat_idx[j, m]]
-            c = conc[sat[j]]
-            d2[j] = (2.0 * nbrs - 12.0 * c) / 3.0 if use_hex else nbrs - 4.0 * c
-        for j in range(n_sat):
-            dcdt[sat[j]] = d2[j]
-            conc[sat[j]] += d2[j] * dt
+        for j in prange(n_sat):
+            for g in range(n_genes):
+                if active[g]:
+                    nbrs = 0.0
+                    for m in range(n_nbrs):
+                        nbrs += conc[sat_idx[j, m], g]
+                    c = conc[sat[j], g]
+                    work[j, g] = (2.0 * nbrs - 12.0 * c) / 3.0 if use_hex else nbrs - 4.0 * c
+        for j in prange(n_sat):
+            for g in range(n_genes):
+                if active[g]:
+                    dcdt[sat[j], g] = work[j, g]
+                    conc[sat[j], g] += work[j, g] * dt
         # unsaturated (border) nodes follow their nearest saturated node
-        for u in range(unsat.shape[0]):
-            conc[unsat[u]] += dcdt[unsat_idx[u]] * dt
-        for k in range(conc.shape[0]):
-            if conc[k] < 0:
-                conc[k] = 0.0
+        for u in prange(unsat.shape[0]):
+            for g in range(n_genes):
+                if active[g]:
+                    conc[unsat[u], g] += dcdt[unsat_idx[u], g] * dt
+        for k in prange(n_spots):
+            for g in range(n_genes):
+                if active[g] and conc[k, g] < 0:
+                    conc[k, g] = 0.0
 
         # Shannon entropy (nats) of the saturated nodes' normalized concentrations; p = 0 adds 0
-        xs = 0.0
-        for j in range(n_sat):
-            if conc[sat[j]] > 0:
-                xs += conc[sat[j]]
-        ent = 0.0
-        if xs >= eps:
-            for j in range(n_sat):
-                x = conc[sat[j]]
-                if x > 0:
-                    xn = x / xs
-                    ent -= np.log(max(xn, eps)) * xn
-        ent /= n_sat
-        if np.abs(ent - prev_ent) <= thresh:
-            return float(i)
-        prev_ent = ent
+        for g in prange(n_genes):
+            if active[g]:
+                total = 0.0
+                for j in range(n_sat):  # sequential: the same summation order as one gene alone
+                    if conc[sat[j], g] > 0:
+                        total += conc[sat[j], g]
+                xs[g] = total
+        for j in prange(n_sat):
+            for g in range(n_genes):
+                x = conc[sat[j], g]
+                if active[g] and x > 0 and xs[g] >= eps:
+                    xn = x / xs[g]
+                    work[j, g] = np.log(max(xn, eps)) * xn
+        for g in prange(n_genes):
+            if active[g]:
+                ent = 0.0
+                if xs[g] >= eps:
+                    for j in range(n_sat):  # sequential, as above
+                        if conc[sat[j], g] > 0:
+                            ent -= work[j, g]
+                ent /= n_sat
+                if np.abs(ent - prev_ent[g]) <= thresh:
+                    settled[g] = i
+                    active[g] = False
+                prev_ent[g] = ent
+        if not active.any():
+            break
 
-    return np.nan
+    return settled
 
 
 def _compute_idxs(
