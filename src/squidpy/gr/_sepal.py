@@ -9,6 +9,7 @@ from anndata import AnnData
 from numba import njit
 from scanpy import logging as logg
 from scipy.sparse import csc_matrix, csr_matrix, issparse, isspmatrix_csr, spmatrix
+from scipy.spatial import cKDTree
 from sklearn.metrics import pairwise_distances
 from spatialdata import SpatialData
 
@@ -234,91 +235,58 @@ def _diffusion(  # noqa: PLR0917, numba requires positional arguments
     dt: float,
     thresh: float,
 ) -> float:
-    """Simulate diffusion process on a regular graph."""
-    sat_shape = sat.shape[0]
-    n_cells = conc.shape[0]
-    entropy_arr = np.zeros(n_iter)
-    nhood = np.zeros(sat_shape)
-    dcdt = np.zeros(n_cells)
+    """Simulate diffusion process on a regular graph; return the iteration the entropy settled at.
+
+    Written as plain loops so that an iteration allocates nothing: the kernel runs up to ``n_iter``
+    iterations per gene, and per-iteration temporaries made it allocation-bound and kept threads from
+    scaling. Each iteration still computes every Laplacian from the previous state before updating.
+
+    Stencils and entropy follow https://github.com/almaan/sepal/blob/master/sepal/models.py; the
+    hexagonal 7-point stencil is from Benster, Kantorovich & Krylov, *Approximate Methods of Higher
+    Analysis* (ISBN 978-0486821603), the rectangular one is the 5-point stencil.
+    """
+    n_sat, n_nbrs = sat_idx.shape
+    eps = np.finfo(np.float64).eps
+    d2 = np.empty(n_sat)
+    dcdt = np.zeros(conc.shape[0])  # only saturated entries are ever written or read
     prev_ent = 1.0
 
     for i in range(n_iter):
-        for j in range(sat_shape):
-            nhood[j] = np.sum(conc[sat_idx[j]])
-        if use_hex:
-            d2 = _laplacian_hex(conc[sat], nhood)
-        else:
-            d2 = _laplacian_rect(conc[sat], nhood)
+        # discrete Laplacian at every saturated node: 7-point stencil (hex) or 5-point (rect)
+        for j in range(n_sat):
+            nbrs = 0.0
+            for m in range(n_nbrs):
+                nbrs += conc[sat_idx[j, m]]
+            c = conc[sat[j]]
+            d2[j] = (2.0 * nbrs - 12.0 * c) / 3.0 if use_hex else nbrs - 4.0 * c
+        for j in range(n_sat):
+            dcdt[sat[j]] = d2[j]
+            conc[sat[j]] += d2[j] * dt
+        # unsaturated (border) nodes follow their nearest saturated node
+        for u in range(unsat.shape[0]):
+            conc[unsat[u]] += dcdt[unsat_idx[u]] * dt
+        for k in range(conc.shape[0]):
+            if conc[k] < 0:
+                conc[k] = 0.0
 
-        dcdt[:] = 0.0
-        dcdt[sat] = d2
-        conc[sat] += dcdt[sat] * dt
-        conc[unsat] += dcdt[unsat_idx] * dt
-        # set values below zero to 0
-        conc[conc < 0] = 0
-        # compute entropy
-        ent = _entropy(conc[sat]) / sat_shape
-        entropy_arr[i] = np.abs(ent - prev_ent)  # estimate entropy difference
+        # Shannon entropy (nats) of the saturated nodes' normalized concentrations; p = 0 adds 0
+        xs = 0.0
+        for j in range(n_sat):
+            if conc[sat[j]] > 0:
+                xs += conc[sat[j]]
+        ent = 0.0
+        if xs >= eps:
+            for j in range(n_sat):
+                x = conc[sat[j]]
+                if x > 0:
+                    xn = x / xs
+                    ent -= np.log(max(xn, eps)) * xn
+        ent /= n_sat
+        if np.abs(ent - prev_ent) <= thresh:
+            return float(i)
         prev_ent = ent
-        if entropy_arr[i] <= thresh:
-            break
 
-    tmp = np.nonzero(entropy_arr <= thresh)[0]
-    return float(tmp[0] if len(tmp) else np.nan)
-
-
-# taken from https://github.com/almaan/sepal/blob/master/sepal/models.py
-@njit(parallel=False, fastmath=True)
-def _laplacian_rect(
-    centers: NDArrayA,
-    nbrs: NDArrayA,
-) -> NDArrayA:
-    """
-    Five point stencil approximation on rectilinear grid.
-
-    See `Wikipedia <https://en.wikipedia.org/wiki/Five-point_stencil>`_ for more information.
-    """
-    d2f: NDArrayA = nbrs - 4 * centers
-    return d2f
-
-
-# taken from https://github.com/almaan/sepal/blob/master/sepal/models.py
-@njit(fastmath=True)
-def _laplacian_hex(
-    centers: NDArrayA,
-    nbrs: NDArrayA,
-) -> NDArrayA:
-    """
-    Seven point stencil approximation on hexagonal grid.
-
-    References
-    ----------
-    Approximate Methods of Higher Analysis,
-    Curtis D. Benster, L.V. Kantorovich, V.I. Krylov,
-    ISBN-13: 978-0486821603.
-    """
-    d2f: NDArrayA = (2.0 * nbrs - 12.0 * centers) / 3.0
-    return d2f
-
-
-# taken from https://github.com/almaan/sepal/blob/master/sepal/models.py
-@njit(fastmath=True)
-def _entropy(
-    xx: NDArrayA,
-) -> float:
-    """Compute Shannon entropy of an array of probability values (in nats)."""
-    xnz = xx[xx > 0]
-    xs: np.float64 = np.sum(xnz)
-    eps = np.finfo(np.float64).eps  # ~2.22e-16
-    if xs < eps:
-        # 0 because
-        # xn represents probabilities
-        # and p(x)=0 is taken as 0 entropy
-        # see https://stats.stackexchange.com/a/433096
-        return 0.0
-    xn = xnz / xs
-    xl = np.log(np.maximum(xn, eps))
-    return float((-xl * xn).sum())
+    return np.nan
 
 
 def _compute_idxs(
@@ -329,12 +297,31 @@ def _compute_idxs(
 
     sat_idx, nearest_sat, un_unsat = _get_nhood_idx(sat, unsat, g.indptr, g.indices, sat_thresh)
 
-    # compute dist btwn remaining unsat and all sat
-    dist = pairwise_distances(spatial[un_unsat], spatial[sat], metric=metric)
-    # assign closest sat to remaining nearest_sat
-    nearest_sat[np.isnan(nearest_sat)] = sat[np.argmin(dist, axis=1)]
+    # assign the closest saturated node to the unsaturated ones without a saturated neighbor
+    nearest_sat[np.isnan(nearest_sat)] = sat[_closest(spatial[un_unsat], spatial[sat], metric)]
 
     return sat, sat_idx, unsat, nearest_sat.astype(np.int32)
+
+
+# Minkowski p of the metrics scipy's cKDTree supports; others take the dense path
+_TREE_P = {"l1": 1, "manhattan": 1, "cityblock": 1, "l2": 2, "euclidean": 2}
+
+
+def _closest(queries: NDArrayA, points: NDArrayA, metric: str) -> NDArrayA:
+    """Index of the closest point for every query, the lowest index among equally close ones.
+
+    A KD-tree instead of a dense ``(queries, points)`` distance matrix, which on a Visium HD grid
+    (millions of bins, many tissue-border bins) does not fit in memory. Ties resolve like
+    ``argmin`` over the dense matrix did: every point at the minimum distance, lowest index wins.
+    """
+    if len(queries) == 0:
+        return np.zeros(0, dtype=np.intp)
+    if metric not in _TREE_P:
+        return np.argmin(pairwise_distances(queries, points, metric=metric), axis=1)
+    p = _TREE_P[metric]
+    tree = cKDTree(points)
+    dist, _ = tree.query(queries, k=1, p=p)
+    return np.array([min(hits) for hits in tree.query_ball_point(queries, r=dist, p=p)], dtype=np.intp)
 
 
 @njit
@@ -362,13 +349,15 @@ def _get_nhood_idx(
         i = sat[idx]
         sat_idx[idx] = g_indices[g_indptr[i] : g_indptr[i + 1]]
 
-    # get closest saturated of unsaturated
+    # get closest saturated of unsaturated: a lookup table, not a scan of `sat` per neighbor
+    is_sat = np.zeros(g_indptr.shape[0] - 1, dtype=np.bool_)
+    is_sat[sat] = True
     nearest_sat = np.full_like(unsat, fill_value=np.nan, dtype=np.float64)
     for idx in range(unsat.shape[0]):
         i = unsat[idx]
         unsat_neigh = g_indices[g_indptr[i] : g_indptr[i + 1]]
         for u in unsat_neigh:
-            if u in sat:  # take the first saturated nhood
+            if is_sat[u]:  # take the first saturated nhood
                 nearest_sat[idx] = u
                 break
 
