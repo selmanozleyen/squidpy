@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 from anndata import AnnData
 
@@ -91,7 +92,9 @@ class TestSlidingWindow:
         """Membership equals checking every cell against every window; overlap columns are bool."""
         xy = adata_squaregrid.obsm["spatial"]
         win = _calculate_window_corners(xy[:, 0].min(), xy[:, 0].max(), xy[:, 1].min(), xy[:, 1].max(), 5, overlap=2)
+        obs_before = adata_squaregrid.obs.copy()
         df = sliding_window(adata_squaregrid, window_size=5, overlap=2, coord_columns=("globalX", "globalY"), copy=True)
+        pd.testing.assert_frame_equal(adata_squaregrid.obs, obs_before)  # copy=True leaves adata untouched
         for i, (x0, x1, y0, y1) in enumerate(win.itertuples(index=False)):
             col = df[f"sliding_window_assignment_window_{i}"]
             assert col.dtype == bool

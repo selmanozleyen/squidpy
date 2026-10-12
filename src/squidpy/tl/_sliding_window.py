@@ -71,9 +71,8 @@ def sliding_window(
 
     adata = extract_adata_if_sdata(adata, table_key=table_key)
 
-    # we don't want to modify the original adata in case of copy=True
-    if copy:
-        adata = adata.copy()
+    # copy=True only reads `adata` and returns a new frame, so it needs no copy of the object (at 100M
+    # cells that copied the whole expression matrix and took longer than the windowing)
 
     # extract coordinates of observations
     x_col, y_col = coord_columns
