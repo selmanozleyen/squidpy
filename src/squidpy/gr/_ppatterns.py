@@ -436,7 +436,7 @@ def _score_perms(
     n_perms: int,
     rng: SeedLike | RNGLike | None,
     n_jobs: int,
-    max_mem: int | str | None,
+    max_mem: int | str | None = None,
     show_progress_bar: bool,
 ) -> tuple[NDArrayA, dict[str, Any]]:
     """Observed scores ``(n_features,)`` and the permutation accumulators `_p_value_calc` needs.
