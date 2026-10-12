@@ -119,3 +119,25 @@ def test_ripley_rng(adata_ripley: AnnData, mode: RipleyStat):
     # regression: simulations must not all be identical to each other
     # (previously every simulation reused the same seed and produced the same point pattern)
     assert not np.allclose(sims1, sims1[:, [0]])
+
+
+def test_ppp_batches_match_pointwise_sampling():
+    """Batched rejection sampling yields the point-wise loop's points and leaves the generator where it did."""
+    from scipy.spatial import ConvexHull, Delaunay
+
+    from squidpy.gr._ripley import _ppp
+
+    pts = np.random.default_rng(1).normal(size=(200, 2)) * [3, 1]  # elongated hull: many rejections
+    hull = ConvexHull(pts)
+    vxs = hull.points[hull.vertices]
+    deln, bbox = Delaunay(vxs), np.array([*vxs.min(0), *vxs.max(0)])
+
+    ref_rng, rng = np.random.default_rng(7), np.random.default_rng(7)
+    for n_obs in (1, 37, 1000):
+        expected = []
+        while len(expected) < n_obs:
+            x, y = ref_rng.uniform(bbox[0], bbox[2]), ref_rng.uniform(bbox[1], bbox[3])
+            if deln.find_simplex((x, y)) >= 0:
+                expected.append((x, y))
+        np.testing.assert_array_equal(_ppp(hull, n_simulations=1, n_observations=n_obs, rng=rng), np.squeeze(expected))
+    assert ref_rng.random() == rng.random()  # the next draw is the same, so later callers see the same stream
