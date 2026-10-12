@@ -158,6 +158,13 @@ _n_jobs_threads = f"""\
 n_jobs
     Number of parallel threads to use.
 {_n_jobs_thread_rules}"""
+_max_mem = """\
+max_mem
+    Memory budget for the function's working buffers, as bytes or a string such as ``"16GB"``,
+    ``"512MiB"`` or ``"1.5TB"`` (``KB``/``MB``/``GB``/``TB`` are powers of 1000, ``KiB``/``MiB``/
+    ``GiB``/``TiB`` powers of 1024). Larger buffers let more work be done per pass. If `None`, an
+    eighth of the memory available to the process, honouring SLURM and container limits. It bounds
+    the buffers only; the input data is already in memory and not counted."""
 _show_progress_bar = """\
 show_progress_bar
     Whether to show the progress bar or not."""
@@ -498,6 +505,7 @@ d = DocstringProcessor(
     parallelize=_parallelize,
     n_jobs=_n_jobs,
     n_jobs_threads=_n_jobs_threads,
+    max_mem=_max_mem,
     show_progress_bar=_show_progress_bar,
     channels=_channels,
     segment_kwargs=_segment_kwargs,

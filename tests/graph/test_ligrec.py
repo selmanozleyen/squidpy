@@ -345,6 +345,19 @@ class TestValidBehavior:
         with pytest.warns(FutureWarning, match=rf"Parameter `{param}` of `test\(\)` is deprecated"):
             pt.test(_CK, **{param: True}, **kw)
 
+    def test_dense_and_sparse_input_agree(self, adata: AnnData, interactions: Interactions_t):
+        """The kernel reads the genes as CSR; a dense `X` must give the same result as a sparse one."""
+        from scipy.sparse import csr_matrix
+
+        kw = {"cluster_key": _CK, "interactions": interactions, "n_perms": 25, "copy": True, "rng": 0}
+        dense = adata.copy()
+        dense.X = np.asarray(dense.X.toarray() if hasattr(dense.X, "toarray") else dense.X)
+        sparse = adata.copy()
+        sparse.X = csr_matrix(dense.X)
+        a, b = ligrec(dense, **kw), ligrec(sparse, **kw)
+        for key in ("means", "pvalues"):
+            pd.testing.assert_frame_equal(a[key], b[key])
+
     def test_paul15_correct_means(self, paul15: AnnData, paul15_means: pd.DataFrame):
         res = ligrec(
             paul15,

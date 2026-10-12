@@ -173,14 +173,13 @@ def test_spatial_autocorr_ties_match_scanpy():
 
 
 @pytest.mark.parametrize("mode", ["moran", "geary"])
-def test_spatial_autocorr_perm_blocks(dummy_adata: AnnData, mode: str, monkeypatch):
+def test_spatial_autocorr_perm_blocks(dummy_adata: AnnData, mode: str):
     """Drawing the permutations block by block must not change the result."""
-    import squidpy.gr._ppatterns as ppatterns
-
     kw = {"mode": mode, "copy": True, "rng": 42, "n_perms": 50}
     expected = spatial_autocorr(dummy_adata, **kw)
-    monkeypatch.setattr(ppatterns, "_perm_block_entries", lambda: 7 * dummy_adata.n_obs)  # 8 blocks, last one short
-    assert_frame_equal(spatial_autocorr(dummy_adata, **kw), expected)
+    # 7 permutations' worth of int32 per block: 8 blocks, the last one short
+    assert_frame_equal(spatial_autocorr(dummy_adata, max_mem=7 * dummy_adata.n_obs * 4, **kw), expected)
+    assert_frame_equal(spatial_autocorr(dummy_adata, max_mem=f"{7 * dummy_adata.n_obs * 4}B", **kw), expected)
 
 
 def test_spatial_autocorr_full_gene_list_reordered(dummy_adata: AnnData):

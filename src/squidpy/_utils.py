@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import inspect
 import os
+import re
 import warnings
 from collections.abc import Callable, Generator, Hashable, Iterable, Sequence
 from contextlib import contextmanager
@@ -361,6 +362,34 @@ def available_memory() -> int | None:
             if limit != "max" and int(limit) < 2**60:  # v1 reports "no limit" as a huge number
                 avail = min(avail, int(limit) - used)
     return max(avail, 0)
+
+
+_MEM_UNITS = {
+    "b": 1, "kb": 10**3, "mb": 10**6, "gb": 10**9, "tb": 10**12,
+    "kib": 2**10, "mib": 2**20, "gib": 2**30, "tib": 2**40,
+}  # fmt: skip
+
+
+def memory_budget(max_mem: int | str | None, *, floor: int) -> int:
+    """Bytes a function may use for its working buffers.
+
+    ``max_mem`` as given: an int in bytes, or a string such as ``"16GB"`` or ``"512MiB"``. If
+    `None`, an eighth of :func:`available_memory`, but at least ``floor`` (also the answer when the
+    OS does not report free memory).
+    """
+    if max_mem is None:
+        free = available_memory()
+        return floor if free is None else max(floor, free // 8)
+    if isinstance(max_mem, str):
+        m = re.fullmatch(r"\s*(\d+(?:\.\d*)?|\.\d+)\s*([kmgt]i?b|b)?\s*", max_mem.lower())
+        if m is None:
+            raise ValueError(f"Expected `max_mem` like '16GB', '512MiB' or a number of bytes, found `{max_mem!r}`.")
+        n = float(m[1]) * _MEM_UNITS[m[2] or "b"]
+    else:
+        n = max_mem
+    if n <= 0:
+        raise ValueError(f"Expected a positive `max_mem`, found `{max_mem!r}`.")
+    return int(n)
 
 
 def get_n_numba_threads(n_threads: int | None) -> int:

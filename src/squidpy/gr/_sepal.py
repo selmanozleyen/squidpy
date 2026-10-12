@@ -18,7 +18,7 @@ from tqdm.auto import tqdm
 from squidpy._compat import old_positionals
 from squidpy._constants._pkg_constants import Key
 from squidpy._docs import d, inject_docs
-from squidpy._utils import NDArrayA, available_memory, deprecated_params, get_n_numba_threads
+from squidpy._utils import NDArrayA, deprecated_params, get_n_numba_threads, memory_budget
 from squidpy._validators import assert_non_empty_sequence
 from squidpy.gr._utils import (
     _assert_connectivity_key,
@@ -62,6 +62,7 @@ def sepal(
     use_raw: bool = False,
     copy: bool = False,
     n_jobs: int | None = None,
+    max_mem: int | str | None = None,
     show_progress_bar: bool = True,
     table_key: str | None = None,
 ) -> pd.DataFrame | None:
@@ -101,6 +102,8 @@ def sepal(
         Whether to access :attr:`anndata.AnnData.raw`.
     %(copy)s
     %(n_jobs_threads)s
+    %(max_mem)s
+        Here: the genes simulated together, each needing 24 bytes per spot.
     %(show_progress_bar)s
     Returns
     -------
@@ -162,6 +165,7 @@ def sepal(
         dt=dt,
         thresh=thresh,
         n_jobs=n_jobs,
+        max_mem=max_mem,
         show_progress_bar=show_progress_bar,
     )
 
@@ -180,22 +184,9 @@ def sepal(
 
 
 # Working memory per block of genes: the concentrations, their change and a per-spot scratch array,
-# 8 bytes each per spot and gene. The floor when the OS does not report free memory.
+# 8 bytes each per spot and gene. The default budget's floor (see `memory_budget`); an eighth of
+# free memory is used when larger, since the per-gene entropy sums run in parallel over a block.
 _BLOCK_BYTES = 4 * 2**30
-
-
-def _block_bytes() -> int:
-    """Memory for one block of genes: at least `_BLOCK_BYTES`, up to an eighth of free memory.
-
-    The per-gene entropy sums are sequential (that keeps results identical) and run in parallel over
-    the genes of a block, so a block needs at least as many genes as threads to use them all. On a
-    2 um Visium HD grid (8.7M spots) the 4 GB floor fits only ~20 genes, which left most threads
-    idle in that phase; an eighth of a large node fits hundreds.
-    """
-    free = available_memory()  # capped by the job's cgroup limit, not the node's free RAM
-    if free is None:
-        return _BLOCK_BYTES
-    return max(_BLOCK_BYTES, free // 8)
 
 
 def _diffusion_genes(
@@ -210,6 +201,7 @@ def _diffusion_genes(
     dt: float,
     thresh: float,
     n_jobs: int,
+    max_mem: int | str | None = None,
     show_progress_bar: bool = True,
 ) -> NDArrayA:
     """Run the diffusion for every gene column, a block of genes at a time.
@@ -220,7 +212,7 @@ def _diffusion_genes(
     arithmetic of a run on its own and stops at its own step.
     """
     n_spots, n_genes = vals.shape
-    block = int(max(1, min(n_genes, _block_bytes() // (24 * n_spots))))
+    block = int(max(1, min(n_genes, memory_budget(max_mem, floor=_BLOCK_BYTES) // (24 * n_spots))))
     scores = np.empty(n_genes)
     prev_threads = numba.get_num_threads()
     numba.set_num_threads(n_jobs)

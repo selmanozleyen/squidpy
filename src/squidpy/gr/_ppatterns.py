@@ -29,10 +29,10 @@ from squidpy._utils import (
     NDArrayA,
     RNGLike,
     SeedLike,
-    available_memory,
     deprecated_params,
     deprecated_randomness_param,
     get_n_numba_threads,
+    memory_budget,
     numba_threads,
     thread_map,
 )
@@ -64,17 +64,15 @@ bl = nt.boolean
 _PERM_BLOCK_SIZE = 2**28
 
 
-def _perm_block_entries() -> int:
-    """Permutation entries held at once: at least `_PERM_BLOCK_SIZE`, more when memory is free.
+def _perm_block_entries(max_mem: int | str | None) -> int:
+    """Permutation entries held at once: ``max_mem`` worth of int32, by default at least `_PERM_BLOCK_SIZE`.
 
     Each block re-pays a scatter over the feature, which at 100M cells (two permutations per block
-    under the fixed cap) dominates the run. So where the OS reports free memory, the buffer may use
-    an eighth of it: at 100M cells that holds 100 permutations in one block.
+    under the fixed cap) dominates the run, so the default grows with free memory: an eighth of it
+    holds 100 permutations of 100M cells in one block.
     """
-    free = available_memory()  # capped by the job's cgroup limit, not the node's free RAM
-    if free is None:
-        return _PERM_BLOCK_SIZE
-    return max(_PERM_BLOCK_SIZE, free // 8 // np.dtype(np.int32).itemsize)
+    item = np.dtype(np.int32).itemsize
+    return memory_budget(max_mem, floor=_PERM_BLOCK_SIZE * item) // item
 
 
 @d.dedent
@@ -114,6 +112,7 @@ def spatial_autocorr(
     use_raw: bool = False,
     copy: bool = False,
     n_jobs: int | None = None,
+    max_mem: int | str | None = None,
     show_progress_bar: bool = True,
     table_key: str | None = None,
 ) -> pd.DataFrame | None:
@@ -177,6 +176,9 @@ def spatial_autocorr(
     %(rng)s
     %(copy)s
     %(n_jobs_threads)s
+    %(max_mem)s
+        Here: the permutation buffer, ``n_perms`` x ``n_cells`` int32; every feature is revisited
+        once per block of permutations that fits.
     %(show_progress_bar)s
 
     Returns
@@ -275,7 +277,14 @@ def spatial_autocorr(
         # the observed score comes from the same kernel as the permuted ones, so exact ties
         # in the tally below stay exact
         score, score_perms = _score_perms(
-            g, vals, mode=mode, n_perms=n_perms, rng=rng, n_jobs=n_jobs, show_progress_bar=show_progress_bar
+            g,
+            vals,
+            mode=mode,
+            n_perms=n_perms,
+            rng=rng,
+            n_jobs=n_jobs,
+            max_mem=max_mem,
+            show_progress_bar=show_progress_bar,
         )
     else:
         score, score_perms = params["func"](g, vals), None  # type: ignore
@@ -427,6 +436,7 @@ def _score_perms(
     n_perms: int,
     rng: SeedLike | RNGLike | None,
     n_jobs: int,
+    max_mem: int | str | None,
     show_progress_bar: bool,
 ) -> tuple[NDArrayA, dict[str, Any]]:
     """Observed scores ``(n_features,)`` and the permutation accumulators `_p_value_calc` needs.
@@ -442,7 +452,7 @@ def _score_perms(
     rngs = np.random.default_rng(rng).spawn(n_perms)
     # Blocks of at most `_perm_block_entries()` entries; every feature is revisited once per block, so
     # the per-block scatter is re-paid. More than one block only once n_perms * n_cells exceeds it.
-    block = int(np.clip(_perm_block_entries() // max(n_cells, 1), 1, n_perms))
+    block = int(np.clip(_perm_block_entries(max_mem) // max(n_cells, 1), 1, n_perms))
     buffer = np.empty((block, n_cells), dtype=np.int32)
     identity = np.arange(n_cells, dtype=np.int32)[None]
     all_cells = np.arange(n_cells, dtype=np.int32)  # `nz` for a dense feature

@@ -16,7 +16,7 @@ from numba.typed import List
 from numba_progress import ProgressBar
 from numpy.typing import NDArray
 from scanpy import logging as logg
-from scipy.sparse import csc_matrix
+from scipy.sparse import csc_matrix, csr_matrix
 from spatialdata import SpatialData
 
 from squidpy._compat import old_positionals
@@ -639,7 +639,9 @@ def ligrec(
 
 @njit(parallel=True, cache=True)
 def _score_permutations(  # noqa: PLR0917, numba requires positional arguments
-    data: NDArrayA,
+    indptr: NDArrayA,
+    indices: NDArrayA,
+    values: NDArrayA,
     clustering: NDArrayA,
     rngs: list[np.random.Generator],
     inv_counts: NDArrayA,
@@ -651,11 +653,13 @@ def _score_permutations(  # noqa: PLR0917, numba requires positional arguments
 ) -> NDArrayA:
     """Shuffle and score one permutation per RNG in ``rngs``; return accumulated p-value counts.
 
+    The data is a CSR matrix ``(n_cells, n_genes)`` given as its three arrays; each permutation adds
+    only the non-zero entries to their shuffled cluster, in cell order, which is the dense sum exactly.
     ``rngs`` must be a :class:`numba.typed.List`, so that it can be indexed inside ``prange``.
     """
     n_perms = len(rngs)
-    n_cells = data.shape[0]
-    n_genes = data.shape[1]
+    n_cells = indptr.shape[0] - 1
+    n_genes = mean_obs.shape[1]
     n_cls = mean_obs.shape[0]
     n_inter = interactions.shape[0]
     n_cpairs = interaction_clusters.shape[0]
@@ -670,8 +674,8 @@ def _score_permutations(  # noqa: PLR0917, numba requires positional arguments
         groups = np.zeros((n_cls, n_genes), dtype=np.float64)
         for cell in range(n_cells):
             cl = perm[cell]
-            for g in range(n_genes):
-                groups[cl, g] += data[cell, g]
+            for e in range(indptr[cell], indptr[cell + 1]):
+                groups[cl, indices[e]] += values[e]
         for k in range(n_cls):
             inv_c = inv_counts[k]
             for g in range(n_genes):
@@ -697,14 +701,27 @@ def _score_permutations(  # noqa: PLR0917, numba requires positional arguments
     return counts
 
 
+def _as_csr(genes: pd.DataFrame) -> csr_matrix:
+    """The gene columns as a CSR float64 matrix with sorted indices, without densifying sparse columns."""
+    if all(isinstance(dt, pd.SparseDtype) for dt in genes.dtypes):
+        x = genes.sparse.to_coo().tocsr()
+    else:
+        x = csr_matrix(genes.to_numpy(dtype=np.float64))
+    x = x.astype(np.float64)
+    x.sum_duplicates()  # also sorts the indices: entries are then added in the dense loop's order
+    return x
+
+
 @njit(parallel=True, cache=True)
-def _cluster_sums(data: NDArrayA, clustering: NDArrayA, n_clusters: int) -> tuple[NDArrayA, NDArrayA]:
-    """Per-cluster sum and number of expressing (``> 0``) cells of every gene.
+def _cluster_sums(  # noqa: PLR0917, numba requires positional arguments
+    indptr: NDArrayA, indices: NDArrayA, values: NDArrayA, clustering: NDArrayA, n_clusters: int, n_genes: int
+) -> tuple[NDArrayA, NDArrayA]:
+    """Per-cluster sum and number of expressing (``> 0``) cells of every gene of a CSR matrix.
 
     Cells are split into chunks whose size depends only on the number of cells, summed in parallel,
     and the chunk partials are added in chunk order: the result is the same for any thread count.
     """
-    n_cells, n_genes = data.shape
+    n_cells = indptr.shape[0] - 1
     chunk = max(65536, -(-n_cells // 256))  # at most 256 partials, whatever the data size
     n_chunks = -(-n_cells // chunk)
     part_sum = np.zeros((n_chunks, n_clusters, n_genes), dtype=np.float64)
@@ -712,11 +729,11 @@ def _cluster_sums(data: NDArrayA, clustering: NDArrayA, n_clusters: int) -> tupl
     for c in prange(n_chunks):
         for i in range(c * chunk, min(n_cells, (c + 1) * chunk)):
             k = clustering[i]
-            for g in range(n_genes):
-                v = data[i, g]
-                part_sum[c, k, g] += v
+            for e in range(indptr[i], indptr[i + 1]):
+                v = values[e]
+                part_sum[c, k, indices[e]] += v
                 if v > 0:
-                    part_cnt[c, k, g] += 1
+                    part_cnt[c, k, indices[e]] += 1
     sums = np.zeros((n_clusters, n_genes), dtype=np.float64)
     counts = np.zeros((n_clusters, n_genes), dtype=np.int64)
     for c in range(n_chunks):
@@ -769,13 +786,13 @@ def _analysis(
     # int cluster ids the kernel indexes `mean_obs` rows with (the categories' codes, 0..n_clusters-1)
     clustering = np.array(data["clusters"].values, dtype=np.int32)
     n_clusters = len(data["clusters"].cat.categories)
-    # Densify the gene columns once, straight to the contiguous C-order float64 (n_cells, n_genes) the
-    # kernel reads. Per-cluster means and expression fractions then come from one parallel pass over
-    # it rather than a pandas groupby, which at 100M cells ran single-threaded for minutes and copied
-    # every cluster for the `> 0` fraction.
+    # The genes stay sparse (CSR, float64): the per-cluster statistics and every permutation only
+    # visit non-zero entries. Adding the zeros a dense array holds changes no float sum, so this is
+    # the dense computation without its (n_cells, n_genes) copy; at 100M cells that copy and a
+    # pandas groupby over it took longer than all permutations.
     genes = data.columns.difference(["clusters"])
-    data_arr = np.ascontiguousarray(data[genes].astype(np.float64).to_numpy(), dtype=np.float64)
-    sums, expressed = _cluster_sums(data_arr, clustering, n_clusters)
+    x = _as_csr(data[genes])
+    sums, expressed = _cluster_sums(x.indptr, x.indices, x.data, clustering, n_clusters, len(genes))
 
     # float sizes so `1.0 / max(...)` is a true reciprocal, not integer division that would zero the means
     cluster_sizes = np.bincount(clustering, minlength=n_clusters).astype(np.float64)
@@ -809,7 +826,9 @@ def _analysis(
         ProgressBar(total=n_perms, unit="permutation", disable=not show_progress_bar) as progress,
     ):
         pval_counts = _score_permutations(
-            data_arr,
+            x.indptr,
+            x.indices,
+            x.data,
             clustering,
             rngs,
             inv_counts,
