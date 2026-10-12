@@ -115,8 +115,18 @@ def sliding_window(
     labels = np.full(len(coords), np.nan, dtype=object)  # overlap == 0: one label per cell
     columns: dict[str, np.ndarray] = {}  # overlap > 0: one membership column per window
 
+    # each library's cells (in obs order), grouped once: comparing the whole column per library is
+    # libraries x cells, which with ~1500 sections of 100M cells took longer than the windowing
+    if library_key is None:
+        cells_of = {None: np.arange(len(coords))}
+    else:
+        codes, uniques = pd.factorize(adata.obs[library_key].to_numpy())
+        order = np.argsort(codes, kind="stable")
+        bounds = np.searchsorted(codes[order], np.arange(len(uniques) + 1))
+        cells_of = {lib: order[bounds[i] : bounds[i + 1]] for i, lib in enumerate(uniques)}
+
     for lib in libraries:
-        lib_pos = np.arange(len(coords)) if lib is None else np.flatnonzero(adata.obs[library_key].to_numpy() == lib)
+        lib_pos = cells_of.get(lib, np.zeros(0, dtype=np.intp))
         x, y = x_all[lib_pos], y_all[lib_pos]
         windows = _calculate_window_corners(
             min_x=x.min(),
