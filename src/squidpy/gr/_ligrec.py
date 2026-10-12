@@ -697,6 +697,34 @@ def _score_permutations(  # noqa: PLR0917, numba requires positional arguments
     return counts
 
 
+@njit(parallel=True, cache=True)
+def _cluster_sums(data: NDArrayA, clustering: NDArrayA, n_clusters: int) -> tuple[NDArrayA, NDArrayA]:
+    """Per-cluster sum and number of expressing (``> 0``) cells of every gene.
+
+    Cells are split into chunks whose size depends only on the number of cells, summed in parallel,
+    and the chunk partials are added in chunk order: the result is the same for any thread count.
+    """
+    n_cells, n_genes = data.shape
+    chunk = max(65536, -(-n_cells // 256))  # at most 256 partials, whatever the data size
+    n_chunks = -(-n_cells // chunk)
+    part_sum = np.zeros((n_chunks, n_clusters, n_genes), dtype=np.float64)
+    part_cnt = np.zeros((n_chunks, n_clusters, n_genes), dtype=np.int64)
+    for c in prange(n_chunks):
+        for i in range(c * chunk, min(n_cells, (c + 1) * chunk)):
+            k = clustering[i]
+            for g in range(n_genes):
+                v = data[i, g]
+                part_sum[c, k, g] += v
+                if v > 0:
+                    part_cnt[c, k, g] += 1
+    sums = np.zeros((n_clusters, n_genes), dtype=np.float64)
+    counts = np.zeros((n_clusters, n_genes), dtype=np.int64)
+    for c in range(n_chunks):
+        sums += part_sum[c]
+        counts += part_cnt[c]
+    return sums, counts
+
+
 @d.dedent
 def _analysis(
     data: pd.DataFrame,
@@ -738,25 +766,23 @@ def _analysis(
         - `'means'` - array of shape `(n_interactions, n_interaction_clusters)` containing the means.
         - `'pvalues'` - array of shape `(n_interactions, n_interaction_clusters)` containing the p-values.
     """
-    # int cluster ids the kernel indexes `groups`/`mean_obs` rows with
+    # int cluster ids the kernel indexes `mean_obs` rows with (the categories' codes, 0..n_clusters-1)
     clustering = np.array(data["clusters"].values, dtype=np.int32)
-    # densify gene columns to float64 so the kernel does pure float math (no sparse/mixed dtypes)
-    data = data.astype({c: np.float64 for c in data.columns if c != "clusters"})
-    groups = data.groupby("clusters", observed=True)
-
-    mean_obs = groups.mean().values  # (n_clusters, n_genes)
-    # see https://github.com/scverse/squidpy/pull/991#issuecomment-2888506296
-    # for why we need to cast to int64 here
-    mask = groups.apply(
-        lambda c: ((c > 0).astype(np.int64).sum() / len(c)) >= threshold
-    ).values  # (n_clusters, n_genes)
+    n_clusters = len(data["clusters"].cat.categories)
+    # Densify the gene columns once, straight to the contiguous C-order float64 (n_cells, n_genes) the
+    # kernel reads. Per-cluster means and expression fractions then come from one parallel pass over
+    # it rather than a pandas groupby, which at 100M cells ran single-threaded for minutes and copied
+    # every cluster for the `> 0` fraction.
+    genes = data.columns.difference(["clusters"])
+    data_arr = np.ascontiguousarray(data[genes].astype(np.float64).to_numpy(), dtype=np.float64)
+    sums, expressed = _cluster_sums(data_arr, clustering, n_clusters)
 
     # float sizes so `1.0 / max(...)` is a true reciprocal, not integer division that would zero the means
-    cluster_sizes = groups.size().values.astype(np.float64)
+    cluster_sizes = np.bincount(clustering, minlength=n_clusters).astype(np.float64)
     inv_counts = 1.0 / np.maximum(cluster_sizes, 1)
-
-    # contiguous C-order float64 (n_cells, n_genes) for cache-friendly kernel access
-    data_arr = np.array(data[data.columns.difference(["clusters"])].values, dtype=np.float64, order="C")
+    mean_obs = sums / np.maximum(cluster_sizes, 1)[:, None]  # (n_clusters, n_genes)
+    # integer counts of expressing cells (see https://github.com/scverse/squidpy/pull/991#issuecomment-2888506296)
+    mask = expressed / np.maximum(cluster_sizes, 1)[:, None] >= threshold  # (n_clusters, n_genes)
 
     # the kernel indexes with these, so keep the dtype in one place
     interactions_i32 = np.array(interactions, dtype=np.int32)
