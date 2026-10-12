@@ -108,7 +108,7 @@ class TestValidBehavior:
         genes = pd.Series([g for gs in pt.interactions[["source", "target"]].values for g in gs], dtype="string")
 
         np.testing.assert_array_equal(genes.values, genes.str.upper().values)
-        np.testing.assert_array_equal(pt._data.columns, pt._data.columns.str.upper())
+        np.testing.assert_array_equal(pt._genes, pt._genes.str.upper())
 
     def test_complex_policy_min(self, adata: AnnData, complexes: Complexes_t):
         g = adata.raw.var_names
@@ -357,6 +357,20 @@ class TestValidBehavior:
         a, b = ligrec(dense, **kw), ligrec(sparse, **kw)
         for key in ("means", "pvalues"):
             pd.testing.assert_frame_equal(a[key], b[key])
+
+    def test_nan_is_no_expression_and_input_untouched(self, adata: AnnData, interactions: Interactions_t):
+        """NaN counts as 0 (as the old `fillna(0)` did), and the user's matrix is never written to."""
+        kw = {"cluster_key": _CK, "interactions": interactions, "n_perms": 25, "copy": True, "rng": 0, "use_raw": False}
+        zeros = adata.copy()
+        zeros.X = np.asarray(zeros.X.toarray() if hasattr(zeros.X, "toarray") else zeros.X, dtype=np.float64)
+        zeros.X[zeros.X < np.quantile(zeros.X, 0.3)] = 0.0
+        nans = zeros.copy()
+        nans.X[zeros.X == 0] = np.nan
+        before = nans.X.copy()
+        a, b = ligrec(zeros, **kw), ligrec(nans, **kw)
+        for key in ("means", "pvalues"):
+            pd.testing.assert_frame_equal(a[key], b[key])
+        np.testing.assert_array_equal(nans.X, before)
 
     def test_paul15_correct_means(self, paul15: AnnData, paul15_means: pd.DataFrame):
         res = ligrec(

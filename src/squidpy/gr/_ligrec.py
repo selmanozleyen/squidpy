@@ -16,7 +16,7 @@ from numba.typed import List
 from numba_progress import ProgressBar
 from numpy.typing import NDArray
 from scanpy import logging as logg
-from scipy.sparse import csc_matrix, csr_matrix
+from scipy.sparse import csr_matrix
 from spatialdata import SpatialData
 
 from squidpy._compat import old_positionals
@@ -131,12 +131,13 @@ class PermutationTestABC(ABC):
                 raise ValueError(f"Expected `{adata.n_obs}` cells in `.raw` object, found `{adata.raw.n_obs}`.")
             adata = adata.raw
 
-        self._data = pd.DataFrame.sparse.from_spmatrix(
-            csc_matrix(adata.X), index=adata.obs_names, columns=adata.var_names
-        ).fillna(0.0)
+        # the expression matrix stays as it is; only the genes the test needs are ever copied (see `_as_csr`)
+        self._x = adata.X
+        self._genes = pd.Index(adata.var_names)  # upper-cased and de-duplicated in `prepare`
+        self._gene_pos = np.arange(len(self._genes))  # column of each of `_genes` in `_x`
 
         self._interactions: pd.DataFrame | None = None
-        self._filtered_data: pd.DataFrame | None = None
+        self._filtered_genes: list[str] | None = None
 
     @d.get_full_description(base="PT_prepare")
     @d.get_sections(base="PT_prepare", sections=["Parameters", "Returns"])
@@ -209,7 +210,7 @@ class PermutationTestABC(ABC):
             raise ValueError("The interactions are empty")
 
         # first uppercase, then drop duplicates
-        self._data.columns = self._data.columns.str.upper()
+        self._genes = self._genes.str.upper()
         self.interactions[SOURCE] = self.interactions[SOURCE].str.upper()
         self.interactions[TARGET] = self.interactions[TARGET].str.upper()
 
@@ -218,10 +219,10 @@ class PermutationTestABC(ABC):
         self.interactions.drop_duplicates(subset=(SOURCE, TARGET), inplace=True, keep="first")
 
         logg.debug("DEBUG: Removing duplicate genes in the data")
-        n_genes_prior = self._data.shape[1]
-        self._data = self._data.loc[:, ~self._data.columns.duplicated()]
-        if self._data.shape[1] != n_genes_prior:
-            logg.warning(f"Removed `{n_genes_prior - self._data.shape[1]}` duplicate gene(s)")
+        first = ~self._genes.duplicated()
+        if not first.all():
+            logg.warning(f"Removed `{int((~first).sum())}` duplicate gene(s)")
+            self._genes, self._gene_pos = self._genes[first], self._gene_pos[first]
 
         self._filter_interactions_complexes(complex_policy)
         self._filter_interactions_by_genes()
@@ -304,10 +305,15 @@ class PermutationTestABC(ABC):
             )
         if TYPE_CHECKING:
             assert isinstance(self.interactions, pd.DataFrame)
-            assert isinstance(self._filtered_data, pd.DataFrame)
+            assert isinstance(self._filtered_genes, list)
 
         interactions = self.interactions[[SOURCE, TARGET]]
-        self._filtered_data["clusters"] = self._adata.obs.copy()[cluster_key].astype("string").astype("category").values
+        # clusters by name as strings, from the categorical's codes: converting the column itself to
+        # strings costs minutes at 100M cells. Only clusters that have cells are valid.
+        obs_clusters = self._adata.obs[cluster_key].cat
+        codes = obs_clusters.codes.to_numpy()
+        names = obs_clusters.categories.astype(str)
+        present = sorted(set(names[np.bincount(codes[codes >= 0], minlength=len(names)) > 0]))
 
         if clusters is None:
             clusters = list(map(str, self._adata.obs[cluster_key].cat.categories))
@@ -316,26 +322,30 @@ class PermutationTestABC(ABC):
         clusters = sorted(
             check_tuple_needles(
                 clusters,  # type: ignore[arg-type]
-                self._filtered_data["clusters"].cat.categories,
+                present,
                 msg="Invalid cluster `{0!r}`.",
                 reraise=True,
             )
         )
-        clusters_flat = list({c for cs in clusters for c in cs})
+        clusters_flat = {c for cs in clusters for c in cs}
 
-        data = self._filtered_data.loc[np.isin(self._filtered_data["clusters"], clusters_flat), :]
-        data["clusters"] = data["clusters"].cat.remove_unused_categories()
-        cat = data["clusters"].cat
-
-        cluster_mapper = dict(zip(cat.categories, range(len(cat.categories)), strict=False))
-        gene_mapper = dict(zip(data.columns[:-1], range(len(data.columns) - 1), strict=False))  # -1 for 'clusters'
-
-        data.columns = [gene_mapper[c] if c != "clusters" else c for c in data.columns]
+        cluster_mapper = {c: i for i, c in enumerate(c for c in present if c in clusters_flat)}
+        # the tested genes in column order: selecting columns in ascending order keeps every row's
+        # indices sorted, so `_as_csr` has nothing to sort
+        cols = self._gene_pos[self._genes.get_indexer(self._filtered_genes)]
+        order = np.argsort(cols)
+        gene_mapper = {self._filtered_genes[i]: j for j, i in enumerate(order)}
         clusters_ = np.array([[cluster_mapper[c1], cluster_mapper[c2]] for c1, c2 in clusters], dtype=np.uint32)
-
-        data["clusters"] = cat.rename_categories(cluster_mapper)
         # much faster than applymap (tested on 1M interactions)
         interactions_ = np.vectorize(lambda g: gene_mapper[g])(interactions.values)
+
+        # each cell's cluster id (-1: a cluster not tested, or NaN, whose code -1 picks the last entry)
+        lookup = np.array([cluster_mapper.get(n, -1) for n in names] + [-1], dtype=np.int32)
+        clustering = lookup[codes]
+        keep = clustering >= 0
+        x = self._x[:, cols[order]]
+        if not keep.all():
+            x, clustering = x[keep], clustering[keep]
 
         n_threads = get_n_numba_threads(n_jobs)
         start = logg.info(
@@ -343,7 +353,9 @@ class PermutationTestABC(ABC):
             f"and `{len(clusters)}` cluster combinations using `{n_threads}` thread(s)"
         )
         analysis = _analysis(
-            data,
+            _as_csr(x),
+            clustering,
+            len(cluster_mapper),
             interactions_,
             clusters_,
             threshold=threshold,
@@ -381,13 +393,12 @@ class PermutationTestABC(ABC):
         return None
 
     def _trim_data(self) -> None:
-        """Subset genes :attr:`_data` to those present in interactions."""
+        """The genes the test reads: those present in interactions."""
         if TYPE_CHECKING:
-            assert isinstance(self._data, pd.DataFrame)
             assert isinstance(self.interactions, pd.DataFrame)
 
         logg.debug("DEBUG: Removing genes not in any interaction")
-        self._filtered_data = self._data.loc[:, list(set(self.interactions[SOURCE]) | set(self.interactions[TARGET]))]
+        self._filtered_genes = list(set(self.interactions[SOURCE]) | set(self.interactions[TARGET]))
 
     def _filter_interactions_by_genes(self) -> None:
         """Subset :attr:`interactions` to only those for which we have the data."""
@@ -396,7 +407,7 @@ class PermutationTestABC(ABC):
 
         logg.debug("DEBUG: Removing interactions with no genes in the data")
         self._interactions = self.interactions[
-            self.interactions[SOURCE].isin(self._data.columns) & self.interactions[TARGET].isin(self._data.columns)
+            self.interactions[SOURCE].isin(self._genes) & self.interactions[TARGET].isin(self._genes)
         ]
 
         if self.interactions.empty:
@@ -426,19 +437,36 @@ class PermutationTestABC(ABC):
         but no filtering happens at this stage - genes not present in the data are filtered at a later stage.
         """
 
+        means: pd.Series | None = None
+
         def find_min_gene_in_complex(_complex: str | None) -> str | None:
+            nonlocal means
             # TODO(michalk8): how can this happen?
             if _complex is None:
                 return None
             if "_" not in _complex:
                 return _complex
-            complexes = [c for c in _complex.split("_") if c in self._data.columns]
+            complexes = [c for c in _complex.split("_") if c in self._genes]
             if not len(complexes):
                 return None
             if len(complexes) == 1:
                 return complexes[0]
 
-            df = self._data[complexes].mean()
+            if means is None:  # mean expression of every gene in some complex, in one pass over the data
+                genes = pd.Index(
+                    sorted(
+                        {
+                            g
+                            for c in pd.concat([self.interactions[SOURCE], self.interactions[TARGET]]).dropna()
+                            if "_" in c
+                            for g in c.split("_")
+                            if g in self._genes
+                        }
+                    )
+                )
+                x = _as_csr(self._x[:, self._gene_pos[self._genes.get_indexer(genes)]])
+                means = pd.Series(np.asarray(x.sum(axis=0)).ravel() / x.shape[0], index=genes)
+            df = means[complexes]
             try:
                 return str(df.index[df.argmin()])
             except ValueError as e:
@@ -701,13 +729,15 @@ def _score_permutations(  # noqa: PLR0917, numba requires positional arguments
     return counts
 
 
-def _as_csr(genes: pd.DataFrame) -> csr_matrix:
-    """The gene columns as a CSR float64 matrix with sorted indices, without densifying sparse columns."""
-    if all(isinstance(dt, pd.SparseDtype) for dt in genes.dtypes):
-        x = genes.sparse.to_coo().tocsr()
-    else:
-        x = csr_matrix(genes.to_numpy(dtype=np.float64))
-    x = x.astype(np.float64)
+def _as_csr(x: Any) -> csr_matrix:
+    """A (cells, genes) selection of the expression matrix as CSR float64, sorted indices, NaN as 0.
+
+    ``x`` is already a copy (a column selection), so this never touches the user's matrix.
+    """
+    x = csr_matrix(x, dtype=np.float64)
+    nan = np.isnan(x.data)
+    if nan.any():  # missing values count as no expression
+        x.data = np.where(nan, 0.0, x.data)
     x.sum_duplicates()  # also sorts the indices: entries are then added in the dense loop's order
     return x
 
@@ -744,7 +774,9 @@ def _cluster_sums(  # noqa: PLR0917, numba requires positional arguments
 
 @d.dedent
 def _analysis(
-    data: pd.DataFrame,
+    x: csr_matrix,
+    clustering: NDArrayA,
+    n_clusters: int,
     interactions: NDArrayA,
     interaction_clusters: NDArrayA,
     *,
@@ -759,8 +791,12 @@ def _analysis(
 
     Parameters
     ----------
-    data
-        Array of shape `(n_cells, n_genes)`.
+    x
+        CSR float64 matrix of shape `(n_cells, n_genes)` with sorted indices (see :func:`_as_csr`).
+    clustering
+        Cluster id (`0 .. n_clusters - 1`) of each cell, :class:`numpy.int32`.
+    n_clusters
+        Number of clusters.
     interactions
         Array of shape `(n_interactions, 2)`.
     interaction_clusters
@@ -783,16 +819,11 @@ def _analysis(
         - `'means'` - array of shape `(n_interactions, n_interaction_clusters)` containing the means.
         - `'pvalues'` - array of shape `(n_interactions, n_interaction_clusters)` containing the p-values.
     """
-    # int cluster ids the kernel indexes `mean_obs` rows with (the categories' codes, 0..n_clusters-1)
-    clustering = np.array(data["clusters"].values, dtype=np.int32)
-    n_clusters = len(data["clusters"].cat.categories)
     # The genes stay sparse (CSR, float64): the per-cluster statistics and every permutation only
     # visit non-zero entries. Adding the zeros a dense array holds changes no float sum, so this is
     # the dense computation without its (n_cells, n_genes) copy; at 100M cells that copy and a
     # pandas groupby over it took longer than all permutations.
-    genes = data.columns.difference(["clusters"])
-    x = _as_csr(data[genes])
-    sums, expressed = _cluster_sums(x.indptr, x.indices, x.data, clustering, n_clusters, len(genes))
+    sums, expressed = _cluster_sums(x.indptr, x.indices, x.data, clustering, n_clusters, x.shape[1])
 
     # float sizes so `1.0 / max(...)` is a true reciprocal, not integer division that would zero the means
     cluster_sizes = np.bincount(clustering, minlength=n_clusters).astype(np.float64)
