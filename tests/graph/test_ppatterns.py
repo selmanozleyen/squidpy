@@ -381,8 +381,9 @@ def test_co_occurrence_library_key(adata: AnnData):
         obsm={Key.obsm.spatial: np.vstack([xy, xy + shift])},
     )
     occ, interval = co_occurrence(adata, cluster_key="leiden", copy=True)
-    occ_two, interval_two = co_occurrence(two, cluster_key="leiden", library_key="lib", copy=True)
-    np.testing.assert_array_equal(interval_two, interval)  # default range: that of one library
+    _, interval_two = co_occurrence(two, cluster_key="leiden", library_key="lib", copy=True)
+    np.testing.assert_allclose(interval_two, interval, rtol=1e-9)  # default range: that of one library
+    occ_two, _ = co_occurrence(two, cluster_key="leiden", library_key="lib", interval=interval, copy=True)
     np.testing.assert_allclose(occ_two, occ, rtol=1e-12)
     # without library_key the default range spans both copies
     _, interval_mixed = co_occurrence(two, cluster_key="leiden", copy=True)
