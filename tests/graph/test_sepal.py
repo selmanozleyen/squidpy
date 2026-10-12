@@ -130,3 +130,17 @@ def test_sepal_kernel_matches_reference(request: pytest.FixtureRequest, fixture:
         got = _diffusion(x[:, gene].astype(np.float64), *args)
         want = _diffusion_vectorized(x[:, gene].astype(np.float64), *args)
         assert got == want or (np.isnan(got) and np.isnan(want)), (gene, got, want)
+
+
+def test_sepal_border_assignment_matches_dense(adata_squaregrid: AnnData):
+    """Border nodes get the same saturated node as with the dense distance matrix, ties included."""
+    from sklearn.metrics import pairwise_distances
+
+    from squidpy.gr._sepal import _closest
+
+    rng = np.random.default_rng(0)
+    xy = adata_squaregrid.obsm["spatial"].astype(np.float64)
+    queries = xy[rng.choice(len(xy), 40, replace=False)] + rng.integers(-3, 4, size=(40, 2))  # many ties
+    for metric in ("l1", "euclidean", "chebyshev"):
+        expected = np.argmin(pairwise_distances(queries, xy, metric=metric), axis=1)
+        np.testing.assert_array_equal(_closest(queries, xy, metric), expected)

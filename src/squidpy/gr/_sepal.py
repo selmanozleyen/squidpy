@@ -9,6 +9,7 @@ from anndata import AnnData
 from numba import njit
 from scanpy import logging as logg
 from scipy.sparse import csc_matrix, csr_matrix, issparse, isspmatrix_csr, spmatrix
+from scipy.spatial import cKDTree
 from sklearn.metrics import pairwise_distances
 from spatialdata import SpatialData
 
@@ -296,12 +297,31 @@ def _compute_idxs(
 
     sat_idx, nearest_sat, un_unsat = _get_nhood_idx(sat, unsat, g.indptr, g.indices, sat_thresh)
 
-    # compute dist btwn remaining unsat and all sat
-    dist = pairwise_distances(spatial[un_unsat], spatial[sat], metric=metric)
-    # assign closest sat to remaining nearest_sat
-    nearest_sat[np.isnan(nearest_sat)] = sat[np.argmin(dist, axis=1)]
+    # assign the closest saturated node to the unsaturated ones without a saturated neighbor
+    nearest_sat[np.isnan(nearest_sat)] = sat[_closest(spatial[un_unsat], spatial[sat], metric)]
 
     return sat, sat_idx, unsat, nearest_sat.astype(np.int32)
+
+
+# Minkowski p of the metrics scipy's cKDTree supports; others take the dense path
+_TREE_P = {"l1": 1, "manhattan": 1, "cityblock": 1, "l2": 2, "euclidean": 2}
+
+
+def _closest(queries: NDArrayA, points: NDArrayA, metric: str) -> NDArrayA:
+    """Index of the closest point for every query, the lowest index among equally close ones.
+
+    A KD-tree instead of a dense ``(queries, points)`` distance matrix, which on a Visium HD grid
+    (millions of bins, many tissue-border bins) does not fit in memory. Ties resolve like
+    ``argmin`` over the dense matrix did: every point at the minimum distance, lowest index wins.
+    """
+    if len(queries) == 0:
+        return np.zeros(0, dtype=np.intp)
+    if metric not in _TREE_P:
+        return np.argmin(pairwise_distances(queries, points, metric=metric), axis=1)
+    p = _TREE_P[metric]
+    tree = cKDTree(points)
+    dist, _ = tree.query(queries, k=1, p=p)
+    return np.array([min(hits) for hits in tree.query_ball_point(queries, r=dist, p=p)], dtype=np.intp)
 
 
 @njit
@@ -329,13 +349,15 @@ def _get_nhood_idx(
         i = sat[idx]
         sat_idx[idx] = g_indices[g_indptr[i] : g_indptr[i + 1]]
 
-    # get closest saturated of unsaturated
+    # get closest saturated of unsaturated: a lookup table, not a scan of `sat` per neighbor
+    is_sat = np.zeros(g_indptr.shape[0] - 1, dtype=np.bool_)
+    is_sat[sat] = True
     nearest_sat = np.full_like(unsat, fill_value=np.nan, dtype=np.float64)
     for idx in range(unsat.shape[0]):
         i = unsat[idx]
         unsat_neigh = g_indices[g_indptr[i] : g_indptr[i + 1]]
         for u in unsat_neigh:
-            if u in sat:  # take the first saturated nhood
+            if is_sat[u]:  # take the first saturated nhood
                 nearest_sat[idx] = u
                 break
 
