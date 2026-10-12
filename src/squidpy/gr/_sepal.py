@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Sequence
 from typing import Literal
 
@@ -19,7 +18,7 @@ from tqdm.auto import tqdm
 from squidpy._compat import old_positionals
 from squidpy._constants._pkg_constants import Key
 from squidpy._docs import d, inject_docs
-from squidpy._utils import NDArrayA, deprecated_params, get_n_numba_threads
+from squidpy._utils import NDArrayA, available_memory, deprecated_params, get_n_numba_threads
 from squidpy._validators import assert_non_empty_sequence
 from squidpy.gr._utils import (
     _assert_connectivity_key,
@@ -193,9 +192,8 @@ def _block_bytes() -> int:
     2 um Visium HD grid (8.7M spots) the 4 GB floor fits only ~20 genes, which left most threads
     idle in that phase; an eighth of a large node fits hundreds.
     """
-    try:
-        free = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")  # Linux; elsewhere the floor
-    except (AttributeError, OSError, ValueError):
+    free = available_memory()  # capped by the job's cgroup limit, not the node's free RAM
+    if free is None:
         return _BLOCK_BYTES
     return max(_BLOCK_BYTES, free // 8)
 

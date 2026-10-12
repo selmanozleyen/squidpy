@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Sequence
 from typing import Any, Literal
 
@@ -30,6 +29,7 @@ from squidpy._utils import (
     NDArrayA,
     RNGLike,
     SeedLike,
+    available_memory,
     deprecated_params,
     deprecated_randomness_param,
     get_n_numba_threads,
@@ -71,9 +71,8 @@ def _perm_block_entries() -> int:
     under the fixed cap) dominates the run. So where the OS reports free memory, the buffer may use
     an eighth of it: at 100M cells that holds 100 permutations in one block.
     """
-    try:
-        free = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")  # Linux; elsewhere the fixed cap
-    except (AttributeError, OSError, ValueError):
+    free = available_memory()  # capped by the job's cgroup limit, not the node's free RAM
+    if free is None:
         return _PERM_BLOCK_SIZE
     return max(_PERM_BLOCK_SIZE, free // 8 // np.dtype(np.int32).itemsize)
 
