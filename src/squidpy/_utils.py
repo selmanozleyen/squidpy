@@ -328,9 +328,11 @@ def thread_map(
 def available_memory() -> int | None:
     """Bytes this process may still allocate, or ``None`` if the OS does not say.
 
-    Free RAM capped by the process's cgroup limit minus its usage: inside a SLURM job or a container
-    the node's free memory is not what the process may use, and sizing buffers by it gets the job
-    OOM-killed. Handles cgroup v2 and v1; elsewhere the free RAM alone.
+    Free RAM capped by every cgroup limit above the process: inside a SLURM job or a container the
+    node's free memory is not what the process may use, and sizing buffers by it gets the job
+    OOM-killed. The limit usually sits on an ancestor (SLURM sets it on the job, the process lives in
+    a step/task child whose own limit is "max"), so the whole chain up to the root is checked.
+    Handles cgroup v2 and v1; elsewhere the free RAM alone.
     """
     try:
         avail = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
@@ -343,21 +345,21 @@ def available_memory() -> int | None:
         return avail
     for hierarchy, controllers, path in entries:
         if hierarchy == "0":  # v2: one unified tree
-            files = (f"/sys/fs/cgroup{path}/memory.max", f"/sys/fs/cgroup{path}/memory.current")
+            root, names = "/sys/fs/cgroup", ("memory.max", "memory.current")
         elif "memory" in controllers.split(","):  # v1: the memory controller's own tree
-            files = (
-                f"/sys/fs/cgroup/memory{path}/memory.limit_in_bytes",
-                f"/sys/fs/cgroup/memory{path}/memory.usage_in_bytes",
-            )
+            root, names = "/sys/fs/cgroup/memory", ("memory.limit_in_bytes", "memory.usage_in_bytes")
         else:
             continue
-        try:
-            with open(files[0]) as lim, open(files[1]) as cur:
-                limit, used = lim.read().strip(), int(cur.read())
-        except (OSError, ValueError):
-            continue
-        if limit != "max" and int(limit) < 2**60:  # v1 reports "no limit" as a huge number
-            avail = min(avail, int(limit) - used)
+        parts = [p for p in path.split("/") if p]
+        for depth in range(len(parts), -1, -1):  # the process's own cgroup, then each ancestor
+            base = "/".join([root, *parts[:depth]])
+            try:
+                with open(f"{base}/{names[0]}") as lim, open(f"{base}/{names[1]}") as cur:
+                    limit, used = lim.read().strip(), int(cur.read())
+            except (OSError, ValueError):
+                continue
+            if limit != "max" and int(limit) < 2**60:  # v1 reports "no limit" as a huge number
+                avail = min(avail, int(limit) - used)
     return max(avail, 0)
 
 
