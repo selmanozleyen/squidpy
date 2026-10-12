@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Sequence
 from typing import Any, Literal
 
@@ -559,7 +560,9 @@ def _occur_count(spatial: NDArrayA, thresholds: NDArrayA, labs: NDArrayA, k: int
     n_jobs = get_n_numba_threads(None)
     # built in threads too: at 100M points the serial build of one tree per label took minutes
     trees = thread_map(lambda c: cKDTree(spatial[labs == c]), range(k), n_jobs=n_jobs)
-    pairs = [(a, b) for a in range(k) for b in range(a, k)]  # counts are symmetric in the label pair
+    # counts are symmetric in the label pair; a label without points (in this library) counts nothing
+    present = np.flatnonzero(np.bincount(labs, minlength=k))
+    pairs = [(a, b) for i, a in enumerate(present) for b in present[i:]]
 
     def count(pair: tuple[int, int]) -> NDArrayA:
         a, b = pair
@@ -587,7 +590,9 @@ def _occur_prob(counts: NDArrayA) -> NDArrayA:
     return occ_prob
 
 
-def _co_occurrence_helper(spatial: NDArrayA, v_radium: NDArrayA, labs: NDArrayA) -> NDArrayA:
+def _co_occurrence_helper(
+    spatial: NDArrayA, v_radium: NDArrayA, labs: NDArrayA, groups: list[NDArrayA] | None = None
+) -> NDArrayA:
     """
     Co-occurrence probabilities of every label pair at every distance threshold.
 
@@ -599,6 +604,8 @@ def _co_occurrence_helper(spatial: NDArrayA, v_radium: NDArrayA, labs: NDArrayA)
          Distance thresholds (in ascending order); the first one only opens the first bin.
     labs : np.ndarray
          Cluster labels (as integers).
+    groups : list of np.ndarray, optional
+         Observation indices of each library; pairs are only counted within a library. `None`: one library.
 
     Returns
     -------
@@ -609,7 +616,12 @@ def _co_occurrence_helper(spatial: NDArrayA, v_radium: NDArrayA, labs: NDArrayA)
     # indexing past k when a category is unused
     _, labs = np.unique(labs, return_inverse=True)
     k = int(labs.max()) + 1
-    return _occur_prob(_occur_count(spatial, v_radium[1:], labs, k))
+    if groups is None:
+        return _occur_prob(_occur_count(spatial, v_radium[1:], labs, k))
+    counts = np.zeros((k, k, len(v_radium) - 1), dtype=np.int64)
+    for g in groups:  # libraries one after another; each count runs its label pairs in parallel
+        counts += _occur_count(spatial[g], v_radium[1:], labs[g], k)
+    return _occur_prob(counts)
 
 
 @d.dedent
@@ -621,6 +633,7 @@ def co_occurrence(
     cluster_key: str,
     spatial_key: str = Key.obsm.spatial,
     interval: int | NDArrayA = 50,
+    library_key: str | None = None,
     copy: bool = False,
     table_key: str | None = None,
 ) -> tuple[NDArrayA, NDArrayA] | None:
@@ -636,6 +649,12 @@ def co_occurrence(
     interval
         Distances interval at which co-occurrence is computed. If :class:`int`, uniformly spaced interval
         of the given size will be used.
+    library_key
+        Key in :attr:`anndata.AnnData.obs` with the library (e.g. tissue section) of each observation.
+        If given, only pairs of observations in the same library are counted, and the counts are pooled
+        over libraries before computing the probabilities: libraries that share a coordinate system are
+        never mixed. With an :class:`int` ``interval``, the thresholds then span from the smallest
+        per-library lower bound to the largest per-library upper bound.
     %(copy)s
 
     Returns
@@ -660,16 +679,29 @@ def co_occurrence(
         # code -1 would index out of bounds in the kernel (the old per-cell dict raised KeyError)
         raise ValueError(f"`adata.obs[{cluster_key!r}]` contains missing values.")
 
+    if library_key is None:
+        groups = [np.arange(len(labs))]
+    else:
+        _assert_categorical_obs(adata, key=library_key)
+        lib = adata.obs[library_key].cat.codes.to_numpy()
+        if (lib < 0).any():
+            raise ValueError(f"`adata.obs[{library_key!r}]` contains missing values.")
+        order = np.argsort(lib, kind="stable")
+        bounds = np.searchsorted(lib[order], np.arange(lib.max() + 2))
+        groups = [order[lo:hi] for lo, hi in itertools.pairwise(bounds) if hi > lo]
+
     # create intervals thresholds
     if isinstance(interval, int):
-        thresh_min, thresh_max = _find_min_max(spatial)
+        # per library, so that the range is that of one library, not of all of them side by side
+        bounds_ = [_find_min_max(spatial[g]) for g in groups if len(g) >= 3]
+        thresh_min, thresh_max = min(b[0] for b in bounds_), max(b[1] for b in bounds_)
         interval = np.linspace(thresh_min, thresh_max, num=interval, dtype=fp)
     else:
         interval = np.array(sorted(interval), dtype=fp, copy=True)
     if len(interval) <= 1:
         raise ValueError(f"Expected interval to be of length `>= 2`, found `{len(interval)}`.")
 
-    out = _co_occurrence_helper(spatial[:, :2], interval, labs)
+    out = _co_occurrence_helper(spatial[:, :2], interval, labs, groups)
     start = logg.info(f"Calculating co-occurrence probabilities for `{len(interval)}` intervals")
 
     if copy:

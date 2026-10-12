@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import numpy as np
+import pandas as pd
 import pytest
 from anndata import AnnData
 from pandas.testing import assert_frame_equal
@@ -362,6 +363,30 @@ def test_co_occurrence_missing_labels_raise(adata: AnnData):
     adata.obs.loc[adata.obs_names[:3], "leiden"] = np.nan
     with pytest.raises(ValueError, match=r"contains missing values"):
         co_occurrence(adata, cluster_key="leiden", copy=True)
+
+
+def test_co_occurrence_library_key(adata: AnnData):
+    """Two copies of one tissue side by side, one library each: the same result as the tissue alone,
+    because pairs across libraries are never counted (pooling doubles every count, not the ratios)."""
+    xy = adata.obsm[Key.obsm.spatial][:, :2]
+    shift = 10 * np.ptp(xy, axis=0).max()
+    two = AnnData(
+        obs=pd.DataFrame(
+            {
+                "leiden": pd.Categorical(np.tile(adata.obs["leiden"].to_numpy(), 2)),
+                "lib": pd.Categorical(np.repeat(["a", "b"], adata.n_obs)),
+            },
+            index=[f"{i}" for i in range(2 * adata.n_obs)],
+        ),
+        obsm={Key.obsm.spatial: np.vstack([xy, xy + shift])},
+    )
+    occ, interval = co_occurrence(adata, cluster_key="leiden", copy=True)
+    occ_two, interval_two = co_occurrence(two, cluster_key="leiden", library_key="lib", copy=True)
+    np.testing.assert_array_equal(interval_two, interval)  # default range: that of one library
+    np.testing.assert_allclose(occ_two, occ, rtol=1e-12)
+    # without library_key the default range spans both copies
+    _, interval_mixed = co_occurrence(two, cluster_key="leiden", copy=True)
+    assert interval_mixed[-1] > 2 * interval[-1]
 
 
 @pytest.mark.parametrize("size", [1, 3])
