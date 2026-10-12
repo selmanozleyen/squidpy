@@ -115,7 +115,7 @@ def _diffusion_vectorized(conc, use_hex, n_iter, sat, sat_idx, unsat, unsat_idx,
 
 @pytest.mark.parametrize(("fixture", "max_neighs"), [("adata", 6), ("adata_squaregrid", 4)])
 def test_sepal_kernel_matches_reference(request: pytest.FixtureRequest, fixture: str, max_neighs: int):
-    """The allocation-free kernel converges at exactly the iteration the vectorized one did."""
+    """The block kernel settles at exactly the step the vectorized one did, alone or in a block."""
     adata = request.getfixturevalue(fixture)
     if max_neighs == 6:
         spatial_neighbors_grid(adata)
@@ -125,11 +125,13 @@ def test_sepal_kernel_matches_reference(request: pytest.FixtureRequest, fixture:
     g.eliminate_zeros()
     sat, sat_idx, unsat, unsat_idx = _compute_idxs(g, adata.obsm["spatial"].astype(np.float64), max_neighs, "l1")
     x = adata.X.toarray() if hasattr(adata.X, "toarray") else np.asarray(adata.X)
-    for gene in np.flatnonzero(x.sum(0) > 0)[:20]:
-        args = (max_neighs == 6, 30000, sat, sat_idx, unsat, unsat_idx, 0.001, 1e-8)
-        got = _diffusion(x[:, gene].astype(np.float64), *args)
-        want = _diffusion_vectorized(x[:, gene].astype(np.float64), *args)
-        assert got == want or (np.isnan(got) and np.isnan(want)), (gene, got, want)
+    genes = np.flatnonzero(x.sum(0) > 0)[:20]
+    args = (max_neighs == 6, 30000, sat, sat_idx, unsat, unsat_idx, 0.001, 1e-8)
+    want = [_diffusion_vectorized(x[:, g].astype(np.float64), *args) for g in genes]
+    together = _diffusion(np.ascontiguousarray(x[:, genes], dtype=np.float64), *args)
+    alone = [_diffusion(np.ascontiguousarray(x[:, [g]], dtype=np.float64), *args)[0] for g in genes]
+    np.testing.assert_array_equal(together, want)  # NaN (never settled) compares equal here
+    np.testing.assert_array_equal(alone, want)
 
 
 def test_sepal_border_assignment_matches_dense(adata_squaregrid: AnnData):
