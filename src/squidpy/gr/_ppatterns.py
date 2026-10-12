@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from typing import Any, Literal
 
@@ -61,6 +62,20 @@ bl = nt.boolean
 # still tens of permutations, and ~1.3-1.6x at 100M, where it falls to two. Raise the cap if that
 # scale matters. It changes no result, see `test_spatial_autocorr_perm_blocks`.
 _PERM_BLOCK_SIZE = 2**28
+
+
+def _perm_block_entries() -> int:
+    """Permutation entries held at once: at least `_PERM_BLOCK_SIZE`, more when memory is free.
+
+    Each block re-pays a scatter over the feature, which at 100M cells (two permutations per block
+    under the fixed cap) dominates the run. So where the OS reports free memory, the buffer may use
+    an eighth of it: at 100M cells that holds 100 permutations in one block.
+    """
+    try:
+        free = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")  # Linux; elsewhere the fixed cap
+    except (AttributeError, OSError, ValueError):
+        return _PERM_BLOCK_SIZE
+    return max(_PERM_BLOCK_SIZE, free // 8 // np.dtype(np.int32).itemsize)
 
 
 @d.dedent
@@ -426,9 +441,9 @@ def _score_perms(
     g = g.astype(np.float64, copy=False)
     w = g.data.sum()
     rngs = np.random.default_rng(rng).spawn(n_perms)
-    # Blocks of at most `_PERM_BLOCK_SIZE` entries; every feature is revisited once per block, so
+    # Blocks of at most `_perm_block_entries()` entries; every feature is revisited once per block, so
     # the per-block scatter is re-paid. More than one block only once n_perms * n_cells exceeds it.
-    block = int(np.clip(_PERM_BLOCK_SIZE // max(n_cells, 1), 1, n_perms))
+    block = int(np.clip(_perm_block_entries() // max(n_cells, 1), 1, n_perms))
     buffer = np.empty((block, n_cells), dtype=np.int32)
     identity = np.arange(n_cells, dtype=np.int32)[None]
     all_cells = np.arange(n_cells, dtype=np.int32)  # `nz` for a dense feature
@@ -532,7 +547,9 @@ def _occur_count(spatial: NDArrayA, thresholds: NDArrayA, labs: NDArrayA, k: int
     memory stays linear in the number of points, and groups of points entirely within, or entirely
     beyond, a radius are counted at once instead of pair by pair. Label pairs run in parallel threads.
     """
-    trees = [cKDTree(spatial[labs == c]) for c in range(k)]
+    n_jobs = get_n_numba_threads(None)
+    # built in threads too: at 100M points the serial build of one tree per label took minutes
+    trees = thread_map(lambda c: cKDTree(spatial[labs == c]), range(k), n_jobs=n_jobs)
     pairs = [(a, b) for a in range(k) for b in range(a, k)]  # counts are symmetric in the label pair
 
     def count(pair: tuple[int, int]) -> NDArrayA:
@@ -541,7 +558,7 @@ def _occur_count(spatial: NDArrayA, thresholds: NDArrayA, labs: NDArrayA, k: int
         return c - trees[a].n if a == b else c  # each point is at distance 0 from itself
 
     counts = np.zeros((k, k, len(thresholds)), dtype=np.int64)
-    for (a, b), c in zip(pairs, thread_map(count, pairs, n_jobs=get_n_numba_threads(None)), strict=True):
+    for (a, b), c in zip(pairs, thread_map(count, pairs, n_jobs=n_jobs), strict=True):
         counts[a, b] = counts[b, a] = c
     return counts
 

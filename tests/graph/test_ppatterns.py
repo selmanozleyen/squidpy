@@ -179,7 +179,7 @@ def test_spatial_autocorr_perm_blocks(dummy_adata: AnnData, mode: str, monkeypat
 
     kw = {"mode": mode, "copy": True, "rng": 42, "n_perms": 50}
     expected = spatial_autocorr(dummy_adata, **kw)
-    monkeypatch.setattr(ppatterns, "_PERM_BLOCK_SIZE", 7 * dummy_adata.n_obs)  # 8 blocks, the last one short
+    monkeypatch.setattr(ppatterns, "_perm_block_entries", lambda: 7 * dummy_adata.n_obs)  # 8 blocks, last one short
     assert_frame_equal(spatial_autocorr(dummy_adata, **kw), expected)
 
 
