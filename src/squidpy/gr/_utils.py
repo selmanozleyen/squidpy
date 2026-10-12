@@ -192,3 +192,20 @@ def _group_offsets(cats: Series) -> tuple[NDArrayA, NDArrayA]:
     members = [np.asarray(per_group.get(c, ()), dtype=np.int64) for c in cats.cat.categories]
     offsets = np.concatenate(([0], np.cumsum([len(m) for m in members]))).astype(np.int64)
     return offsets, np.concatenate(members) if members else np.empty(0, dtype=np.int64)
+
+
+def _rmax_rule(coords: NDArrayA, *, area: float | None = None, nearest: bool = False) -> float:
+    """Default largest distance of a point-pattern statistic: spatstat's ``rmax.rule``.
+
+    Pair counts within a distance (Ripley's K/L, co-occurrence): a quarter of the bounding box's
+    shorter side, but at most the radius that holds 1000 points around a typical point. Nearest-neighbour
+    distributions (Ripley's F/G): half the bounding box's diagonal, but at most the radius by which a
+    Poisson process of the same intensity has F(r) = 1 - 1e-5. The intensity is the number of points
+    over ``area`` (default: the bounding box's), so on large data the limit follows the density and
+    stays local, and on a single small section it is Ripley's rule.
+    """
+    span = np.ptp(np.asarray(coords)[:, :2], axis=0)
+    intensity = len(coords) / (area if area is not None else float(np.prod(span)))
+    if nearest:
+        return float(min(np.hypot(*span) / 2, np.sqrt(np.log(1e5) / (np.pi * intensity))))
+    return float(min(span.min() / 4, np.sqrt(1000 / (np.pi * intensity))))

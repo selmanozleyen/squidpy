@@ -88,6 +88,20 @@ class TestSlidingWindow:
                     f"{sliding_window_key}_window_{i}" in df.columns
                 )  # correct number of columns; multiple sliding windows
 
+    def test_sliding_window_default_size_per_library(self, adata_squaregrid: AnnData):
+        """The default window size comes from one library's extent, not from all libraries side by side:
+        two copies placed far apart get the windows of a single copy."""
+        xy = adata_squaregrid.obsm["spatial"]
+        two = AnnData(
+            obs=pd.DataFrame(
+                {"lib": pd.Categorical(np.repeat(["a", "b"], len(xy)))}, index=[str(i) for i in range(2 * len(xy))]
+            ),
+            obsm={"spatial": np.vstack([xy, xy + 1000])},
+        )
+        single = sliding_window(adata_squaregrid, copy=True)["sliding_window_assignment"]
+        both = sliding_window(two, library_key="lib", copy=True)["sliding_window_assignment"]
+        np.testing.assert_array_equal(both.to_numpy()[: len(xy)].astype(str), ("a_" + single.astype(str)).to_numpy())
+
     def test_sliding_window_matches_brute_force(self, adata_squaregrid: AnnData):
         """Membership equals checking every cell against every window; overlap columns are bool."""
         xy = adata_squaregrid.obsm["spatial"]

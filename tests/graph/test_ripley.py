@@ -141,3 +141,33 @@ def test_ppp_batches_match_pointwise_sampling():
                 expected.append((x, y))
         np.testing.assert_array_equal(_ppp(hull, n_simulations=1, n_observations=n_obs, rng=rng), np.squeeze(expected))
     assert ref_rng.random() == rng.random()  # the next draw is the same, so later callers see the same stream
+
+
+def test_rmax_rule_matches_spatstat():
+    """spatstat's rmax.rule on a uniform square of side 100: Ripley's rule for few points, the
+    1000-neighbour radius (K) or the F(r) = 1 - 1e-5 radius (F, G) for many."""
+    from squidpy.gr._utils import _rmax_rule
+
+    rng = np.random.default_rng(0)
+    for n in (500, 200_000):
+        xy = rng.uniform(0, 100, size=(n, 2))
+        span = np.ptp(xy, axis=0)
+        intensity = n / np.prod(span)
+        assert _rmax_rule(xy) == pytest.approx(min(span.min() / 4, np.sqrt(1000 / (np.pi * intensity))))
+        assert _rmax_rule(xy, nearest=True) == pytest.approx(
+            min(np.hypot(*span) / 2, np.sqrt(np.log(1e5) / (np.pi * intensity)))
+        )
+    assert _rmax_rule(rng.uniform(0, 100, size=(500, 2))) == pytest.approx(25, rel=0.02)  # Ripley's rule binds
+
+
+@pytest.mark.parametrize("mode", [RipleyStat.F, RipleyStat.L])
+def test_ripley_default_max_dist(adata_ripley: AnnData, mode: RipleyStat):
+    """Without max_dist, the support ends at spatstat's rule with the convex hull's area."""
+    from scipy.spatial import ConvexHull
+
+    from squidpy.gr._utils import _rmax_rule
+
+    xy = adata_ripley.obsm["spatial"]
+    res = ripley(adata_ripley, cluster_key=CLUSTER_KEY, mode=mode.s, n_simulations=2, copy=True)
+    expected = _rmax_rule(xy, area=ConvexHull(xy).volume, nearest=mode != RipleyStat.L)
+    assert res["bins"][-1] == pytest.approx(expected)

@@ -390,6 +390,17 @@ def test_co_occurrence_library_key(adata: AnnData):
     assert interval_mixed[-1] > 2 * interval[-1]
 
 
+def test_co_occurrence_default_interval_is_local(adata: AnnData):
+    """The default thresholds end at spatstat's rule for pair counts, not at half the diagonal."""
+    from squidpy.gr._utils import _rmax_rule
+
+    xy = adata.obsm[Key.obsm.spatial].astype(np.float32)
+    _, interval = co_occurrence(adata, cluster_key="leiden", copy=True)
+    assert interval[-1] == pytest.approx(_rmax_rule(xy), rel=1e-6)
+    assert interval[-1] < _find_min_max(xy)[1]
+    assert interval[0] < interval[-1]
+
+
 @pytest.mark.parametrize("size", [1, 3])
 def test_co_occurrence_explicit_interval(adata: AnnData, size: int):
     minn, maxx = _find_min_max(adata.obsm[Key.obsm.spatial])

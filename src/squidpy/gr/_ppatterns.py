@@ -42,6 +42,7 @@ from squidpy.gr._utils import (
     _assert_categorical_obs,
     _assert_connectivity_key,
     _assert_spatial_basis,
+    _rmax_rule,
     _save_data,
     extract_adata_if_sdata,
 )
@@ -647,14 +648,16 @@ def co_occurrence(
     %(cluster_key)s
     %(spatial_key)s
     interval
-        Distances interval at which co-occurrence is computed. If :class:`int`, uniformly spaced interval
-        of the given size will be used.
+        Distances interval at which co-occurrence is computed. If :class:`int`, that many uniformly spaced
+        thresholds, up to spatstat's rule for pair-count statistics (``rmax.rule``): a quarter of the
+        bounding box's shorter side, but at most the radius holding 1000 observations around a typical
+        one (intensity over the bounding box), so the largest distance stays local on large data.
     library_key
         Key in :attr:`anndata.AnnData.obs` with the library (e.g. tissue section) of each observation.
         If given, only pairs of observations in the same library are counted, and the counts are pooled
         over libraries before computing the probabilities: libraries that share a coordinate system are
         never mixed. With an :class:`int` ``interval``, the thresholds then span from the smallest
-        per-library lower bound to the largest per-library upper bound.
+        per-library lower bound to the largest per-library upper bound, each from that library alone.
     %(copy)s
 
     Returns
@@ -693,8 +696,10 @@ def co_occurrence(
     # create intervals thresholds
     if isinstance(interval, int):
         # per library, so that the range is that of one library, not of all of them side by side
-        bounds_ = [_find_min_max(spatial[g]) for g in groups if len(g) >= 3]
-        thresh_min, thresh_max = min(b[0] for b in bounds_), max(b[1] for b in bounds_)
+        big = [g for g in groups if len(g) >= 3]
+        thresh_max = max(_rmax_rule(spatial[g]) for g in big)
+        # the lower bound stays below the upper one, however far apart the two corner cells sit
+        thresh_min = min(min(_find_min_max(spatial[g])[0] for g in big), thresh_max / interval)
         interval = np.linspace(thresh_min, thresh_max, num=interval, dtype=fp)
     else:
         interval = np.array(sorted(interval), dtype=fp, copy=True)
