@@ -179,8 +179,8 @@ def test_spatial_autocorr_perm_blocks(dummy_adata: AnnData, mode: str):
     kw = {"mode": mode, "copy": True, "rng": 42, "n_perms": 50}
     expected = spatial_autocorr(dummy_adata, **kw)
     # 7 permutations' worth of int32 per block: 8 blocks, the last one short
-    assert_frame_equal(spatial_autocorr(dummy_adata, max_mem=7 * dummy_adata.n_obs * 4, **kw), expected)
-    assert_frame_equal(spatial_autocorr(dummy_adata, max_mem=f"{7 * dummy_adata.n_obs * 4}B", **kw), expected)
+    assert_frame_equal(spatial_autocorr(dummy_adata, working_memory=7 * dummy_adata.n_obs * 4 / 2**20, **kw), expected)
+    assert_frame_equal(spatial_autocorr(dummy_adata, working_memory=f"{7 * dummy_adata.n_obs * 4}B", **kw), expected)
 
 
 def test_spatial_autocorr_full_gene_list_reordered(dummy_adata: AnnData):

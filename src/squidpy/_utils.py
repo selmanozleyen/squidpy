@@ -370,25 +370,27 @@ _MEM_UNITS = {
 }  # fmt: skip
 
 
-def memory_budget(max_mem: int | str | None, *, floor: int) -> int:
+def memory_budget(working_memory: float | str | None, *, floor: int) -> int:
     """Bytes a function may use for its working buffers.
 
-    ``max_mem`` as given: an int in bytes, or a string such as ``"16GB"`` or ``"512MiB"``. If
-    `None`, an eighth of :func:`available_memory`, but at least ``floor`` (also the answer when the
-    OS does not report free memory).
+    ``working_memory`` as given: a number of MiB (as scikit-learn's ``working_memory``), or a string
+    with a unit such as ``"16GB"`` or ``"512MiB"``. If `None`, an eighth of :func:`available_memory`,
+    but at least ``floor`` (also the answer when the OS does not report free memory).
     """
-    if max_mem is None:
+    if working_memory is None:
         free = available_memory()
         return floor if free is None else max(floor, free // 8)
-    if isinstance(max_mem, str):
-        m = re.fullmatch(r"\s*(\d+(?:\.\d*)?|\.\d+)\s*([kmgt]i?b|b)?\s*", max_mem.lower())
+    if isinstance(working_memory, str):
+        m = re.fullmatch(r"\s*(\d+(?:\.\d*)?|\.\d+)\s*([kmgt]i?b|b)?\s*", working_memory.lower())
         if m is None:
-            raise ValueError(f"Expected `max_mem` like '16GB', '512MiB' or a number of bytes, found `{max_mem!r}`.")
-        n = float(m[1]) * _MEM_UNITS[m[2] or "b"]
+            raise ValueError(
+                f"Expected `working_memory` like '16GB', '512MiB' or a number of MiB, found `{working_memory!r}`."
+            )
+        n = float(m[1]) * _MEM_UNITS[m[2] or "mib"]
     else:
-        n = max_mem
+        n = working_memory * _MEM_UNITS["mib"]
     if n <= 0:
-        raise ValueError(f"Expected a positive `max_mem`, found `{max_mem!r}`.")
+        raise ValueError(f"Expected a positive `working_memory`, found `{working_memory!r}`.")
     return int(n)
 
 

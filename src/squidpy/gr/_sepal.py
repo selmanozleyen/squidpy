@@ -62,7 +62,7 @@ def sepal(
     use_raw: bool = False,
     copy: bool = False,
     n_jobs: int | None = None,
-    max_mem: int | str | None = None,
+    working_memory: float | str | None = None,
     show_progress_bar: bool = True,
     table_key: str | None = None,
 ) -> pd.DataFrame | None:
@@ -102,7 +102,7 @@ def sepal(
         Whether to access :attr:`anndata.AnnData.raw`.
     %(copy)s
     %(n_jobs_threads)s
-    %(max_mem)s
+    %(working_memory)s
         Here: the genes simulated together, each needing 24 bytes per spot.
     %(show_progress_bar)s
     Returns
@@ -165,7 +165,7 @@ def sepal(
         dt=dt,
         thresh=thresh,
         n_jobs=n_jobs,
-        max_mem=max_mem,
+        working_memory=working_memory,
         show_progress_bar=show_progress_bar,
     )
 
@@ -201,7 +201,7 @@ def _diffusion_genes(
     dt: float,
     thresh: float,
     n_jobs: int,
-    max_mem: int | str | None = None,
+    working_memory: float | str | None = None,
     show_progress_bar: bool = True,
 ) -> NDArrayA:
     """Run the diffusion for every gene column, a block of genes at a time.
@@ -212,7 +212,7 @@ def _diffusion_genes(
     arithmetic of a run on its own and stops at its own step.
     """
     n_spots, n_genes = vals.shape
-    block = int(max(1, min(n_genes, memory_budget(max_mem, floor=_BLOCK_BYTES) // (24 * n_spots))))
+    block = int(max(1, min(n_genes, memory_budget(working_memory, floor=_BLOCK_BYTES) // (24 * n_spots))))
     scores = np.empty(n_genes)
     prev_threads = numba.get_num_threads()
     numba.set_num_threads(n_jobs)

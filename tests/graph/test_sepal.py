@@ -149,9 +149,9 @@ def test_sepal_border_assignment_matches_dense(adata_squaregrid: AnnData):
 
 
 def test_sepal_block_size_does_not_change_scores(adata: AnnData):
-    """One gene per block (a tiny `max_mem`) gives the scores of the default, all-genes-at-once block."""
+    """One gene per block (a tiny `working_memory`) gives the scores of the default, all-genes-at-once block."""
     spatial_neighbors_grid(adata)
     genes = adata.var_names[np.asarray(adata.X.sum(0)).ravel() > 0][:12]
     default = sepal(adata, max_neighs=6, genes=genes, copy=True, show_progress_bar=False)
-    one_by_one = sepal(adata, max_neighs=6, genes=genes, copy=True, show_progress_bar=False, max_mem=24 * adata.n_obs)
+    one_by_one = sepal(adata, max_neighs=6, genes=genes, copy=True, show_progress_bar=False, working_memory=f"{24 * adata.n_obs}B")
     assert_frame_equal(default, one_by_one)
