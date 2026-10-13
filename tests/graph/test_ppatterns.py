@@ -409,7 +409,7 @@ def test_co_occurrence_many_libraries(adata: AnnData, threads: int, monkeypatch:
 
     monkeypatch.setattr(pp, "get_n_numba_threads", lambda n_jobs=None: threads if n_jobs is None else n_jobs)
     xy = adata.obsm[Key.obsm.spatial][:, :2]
-    shift = 10 * np.ptp(xy, axis=0).max()
+    shift = 2.0 ** np.ceil(np.log2(2 * np.ptp(xy, axis=0).max()))  # > any threshold apart; power of 2
     n = 8
     many = AnnData(
         obs=pd.DataFrame(
@@ -419,7 +419,7 @@ def test_co_occurrence_many_libraries(adata: AnnData, threads: int, monkeypatch:
             },
             index=[f"{i}" for i in range(n * adata.n_obs)],
         ),
-        obsm={Key.obsm.spatial: np.vstack([xy + i * shift for i in range(n)])},
+        obsm={Key.obsm.spatial: np.vstack([xy + shift * np.array([i % 3, i // 3]) for i in range(n)])},
     )
     occ, interval = co_occurrence(adata, cluster_key="leiden", copy=True)
     occ_many, _ = co_occurrence(many, cluster_key="leiden", library_key="lib", interval=interval, copy=True)
