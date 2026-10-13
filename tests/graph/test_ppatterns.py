@@ -401,6 +401,31 @@ def test_co_occurrence_default_interval_is_local(adata: AnnData):
     assert interval[0] < interval[-1]
 
 
+@pytest.mark.parametrize("threads", [2, 64])  # 8 libraries: one thread each, or one after another
+def test_co_occurrence_many_libraries(adata: AnnData, threads: int, monkeypatch: pytest.MonkeyPatch):
+    """Eight copies of one tissue, one library each, give the tissue's own probabilities either way the
+    libraries are scheduled."""
+    import squidpy.gr._ppatterns as pp
+
+    monkeypatch.setattr(pp, "get_n_numba_threads", lambda n_jobs=None: threads if n_jobs is None else n_jobs)
+    xy = adata.obsm[Key.obsm.spatial][:, :2]
+    shift = 10 * np.ptp(xy, axis=0).max()
+    n = 8
+    many = AnnData(
+        obs=pd.DataFrame(
+            {
+                "leiden": pd.Categorical(np.tile(adata.obs["leiden"].to_numpy(), n)),
+                "lib": pd.Categorical(np.repeat([f"l{i}" for i in range(n)], adata.n_obs)),
+            },
+            index=[f"{i}" for i in range(n * adata.n_obs)],
+        ),
+        obsm={Key.obsm.spatial: np.vstack([xy + i * shift for i in range(n)])},
+    )
+    occ, interval = co_occurrence(adata, cluster_key="leiden", copy=True)
+    occ_many, _ = co_occurrence(many, cluster_key="leiden", library_key="lib", interval=interval, copy=True)
+    np.testing.assert_allclose(occ_many, occ, rtol=1e-12)
+
+
 @pytest.mark.parametrize("size", [1, 3])
 def test_co_occurrence_explicit_interval(adata: AnnData, size: int):
     minn, maxx = _find_min_max(adata.obsm[Key.obsm.spatial])

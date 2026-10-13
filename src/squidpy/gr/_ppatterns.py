@@ -551,14 +551,16 @@ def _score_perms(
     }
 
 
-def _occur_count(spatial: NDArrayA, thresholds: NDArrayA, labs: NDArrayA, k: int) -> NDArrayA:
+def _occur_count(
+    spatial: NDArrayA, thresholds: NDArrayA, labs: NDArrayA, k: int, n_jobs: int | None = None
+) -> NDArrayA:
     """Count ordered pairs ``i != j`` with ``|x_i - x_j| <= thresholds[r]``, per label pair and threshold.
 
     One KD-tree per label and dual-tree counting (:meth:`scipy.spatial.cKDTree.count_neighbors`):
     memory stays linear in the number of points, and groups of points entirely within, or entirely
-    beyond, a radius are counted at once instead of pair by pair. Label pairs run in parallel threads.
+    beyond, a radius are counted at once instead of pair by pair. Label pairs run in ``n_jobs`` threads.
     """
-    n_jobs = get_n_numba_threads(None)
+    n_jobs = get_n_numba_threads(n_jobs)
     # built in threads too: at 100M points the serial build of one tree per label took minutes
     trees = thread_map(lambda c: cKDTree(spatial[labs == c]), range(k), n_jobs=n_jobs)
     # counts are symmetric in the label pair; a label without points (in this library) counts nothing
@@ -619,10 +621,15 @@ def _co_occurrence_helper(
     k = int(labs.max()) + 1
     if groups is None:
         return _occur_prob(_occur_count(spatial, v_radium[1:], labs, k))
-    counts = np.zeros((k, k, len(v_radium) - 1), dtype=np.int64)
-    for g in groups:  # libraries one after another; each count runs its label pairs in parallel
-        counts += _occur_count(spatial[g], v_radium[1:], labs[g], k)
-    return _occur_prob(counts)
+    n_jobs = get_n_numba_threads(None)
+    if len(groups) < n_jobs:  # few libraries: one after another, each with its label pairs in parallel
+        parts = [_occur_count(spatial[g], v_radium[1:], labs[g], k) for g in groups]
+    else:  # many (small) libraries: one thread per library, largest first so the pool ends evenly
+        groups = sorted(groups, key=len, reverse=True)
+        parts = thread_map(
+            lambda g: _occur_count(spatial[g], v_radium[1:], labs[g], k, n_jobs=1), groups, n_jobs=n_jobs
+        )
+    return _occur_prob(np.sum(parts, axis=0, dtype=np.int64))
 
 
 @d.dedent
