@@ -656,8 +656,8 @@ def co_occurrence(
         Key in :attr:`anndata.AnnData.obs` with the library (e.g. tissue section) of each observation.
         If given, only pairs of observations in the same library are counted, and the counts are pooled
         over libraries before computing the probabilities: libraries that share a coordinate system are
-        never mixed. With an :class:`int` ``interval``, the thresholds then span from the smallest
-        per-library lower bound to the largest per-library upper bound, each from that library alone.
+        never mixed. With an :class:`int` ``interval``, the upper threshold is the median over libraries
+        of each library's own rule (so one sparse or tiny library does not set it for all of them).
     %(copy)s
 
     Returns
@@ -697,7 +697,8 @@ def co_occurrence(
     if isinstance(interval, int):
         # per library, so that the range is that of one library, not of all of them side by side
         big = [g for g in groups if len(g) >= 3]
-        thresh_max = max(_rmax_rule(spatial[g]) for g in big)
+        # median: the largest per-library value comes from the sparsest library and spans every other one
+        thresh_max = float(np.median([_rmax_rule(spatial[g]) for g in big]))
         # the lower bound stays below the upper one, however far apart the two corner cells sit
         thresh_min = min(min(_find_min_max(spatial[g])[0] for g in big), thresh_max / interval)
         interval = np.linspace(thresh_min, thresh_max, num=interval, dtype=fp)
