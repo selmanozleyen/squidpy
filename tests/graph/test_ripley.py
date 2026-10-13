@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 from anndata import AnnData
 
@@ -171,3 +172,15 @@ def test_ripley_default_max_dist(adata_ripley: AnnData, mode: RipleyStat):
     res = ripley(adata_ripley, cluster_key=CLUSTER_KEY, mode=mode.s, n_simulations=2, copy=True)
     expected = _rmax_rule(xy, area=ConvexHull(xy).volume, nearest=mode != RipleyStat.L)
     assert res["bins"][-1] == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("mode", [RipleyStat.F, RipleyStat.G])
+def test_ripley_tiny_cluster_raises(adata_ripley: AnnData, mode: RipleyStat):
+    """F and G need n_neigh points in every cluster; a smaller one is named in a clear error."""
+    adata = adata_ripley.copy()
+    labels = adata.obs[CLUSTER_KEY].astype(str).to_numpy()
+    labels[0] = "tiny"
+    adata.obs[CLUSTER_KEY] = pd.Categorical(labels)
+    with pytest.raises(ValueError, match=r"`tiny` has 1\. Remove these clusters or lower `n_neigh`"):
+        ripley(adata, cluster_key=CLUSTER_KEY, mode=mode.s, n_simulations=2, copy=True)
+    ripley(adata, cluster_key=CLUSTER_KEY, mode=mode.s, n_neigh=1, n_simulations=2, copy=True)  # fits again

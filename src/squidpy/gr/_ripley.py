@@ -173,6 +173,14 @@ def ripley(
     n_jobs = get_n_numba_threads(None)
     n_clusters = int(np.max(cluster_idx)) + 1
     coords_c = [coordinates[cluster_idx == i, :] for i in range(n_clusters)]
+    if mode != RipleyStat.L:
+        sizes = np.array([len(c) for c in coords_c])
+        if (small := np.flatnonzero(sizes < n_neigh)).size:
+            raise ValueError(
+                f"Ripley's {mode.s} needs at least `n_neigh={n_neigh}` observations per cluster, but "
+                + ", ".join(f"`{le.classes_[i]}` has {sizes[i]}" for i in small)
+                + ". Remove these clusters or lower `n_neigh`."
+            )
     if mode == RipleyStat.F:
         # drawn in cluster order from the one generator, as before; the last draw is reused below
         randoms = [_ppp(hull, n_simulations=1, n_observations=n_observations, rng=obs_rng) for _ in range(n_clusters)]
