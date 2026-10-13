@@ -184,3 +184,19 @@ def test_ripley_tiny_cluster_raises(adata_ripley: AnnData, mode: RipleyStat):
     with pytest.raises(ValueError, match=r"`tiny` has 1\. Remove these clusters or lower `n_neigh`"):
         ripley(adata, cluster_key=CLUSTER_KEY, mode=mode.s, n_simulations=2, copy=True)
     ripley(adata, cluster_key=CLUSTER_KEY, mode=mode.s, n_neigh=1, n_simulations=2, copy=True)  # fits again
+
+
+@pytest.mark.parametrize("metric", ["euclidean", "manhattan", "chebyshev"])
+@pytest.mark.parametrize("k", [1, 2])
+def test_knn_distances_match_sklearn(metric: str, k: int):
+    """scipy's thread-safe nearest-neighbour path gives sklearn's distances, in the same (n, k) shape."""
+    from sklearn.neighbors import NearestNeighbors
+
+    from squidpy.gr._ripley import _knn_distances
+
+    rng = np.random.default_rng(0)
+    points, queries = rng.uniform(0, 100, (500, 2)), rng.uniform(0, 100, (300, 2))
+    expected = NearestNeighbors(metric=metric, n_neighbors=k).fit(points).kneighbors(queries, n_neighbors=k)[0]
+    got = _knn_distances(points, queries, k, metric)
+    assert got.shape == expected.shape == (300, k)
+    np.testing.assert_allclose(got, expected, rtol=1e-12)

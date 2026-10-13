@@ -188,19 +188,18 @@ def ripley(
 
     def observed(i: int) -> NDArrayA:
         if mode == RipleyStat.F:
-            tree_c = NearestNeighbors(metric=metric, n_neighbors=n_neigh).fit(coords_c[i])
-            distances, _ = tree_c.kneighbors(randoms[i], n_neighbors=n_neigh)
-            return _f_g_function(distances.squeeze(), support)[1]
+            return _f_g_function(_knn_distances(coords_c[i], randoms[i], n_neigh, metric).squeeze(), support)[1]
         if mode == RipleyStat.G:
-            tree_c = NearestNeighbors(metric=metric, n_neighbors=n_neigh).fit(coords_c[i])
-            distances, _ = tree_c.kneighbors(coordinates[cluster_idx != i, :], n_neighbors=n_neigh)
-            return _f_g_function(distances.squeeze(), support)[1]
+            others = coordinates[cluster_idx != i, :]
+            return _f_g_function(_knn_distances(coords_c[i], others, n_neigh, metric).squeeze(), support)[1]
         raise NotImplementedError(f"Mode `{mode.s!r}` is not yet implemented.")
 
+    # nearest-neighbour queries only in threads through scipy (see `_knn_distances`)
+    knn_jobs = n_jobs if metric in _SCIPY_P else 1
     if mode == RipleyStat.L:
         obs_arr[:] = _l_estimate(_pair_counts(coords_c, support, metric, n_jobs), N, area)
     else:
-        obs_arr[:] = thread_map(observed, range(n_clusters), n_jobs=n_jobs)
+        obs_arr[:] = thread_map(observed, range(n_clusters), n_jobs=knn_jobs)
     bins = support  # np.histogram returns the given edges unchanged, so F/G bins are the support too
 
     sims = np.empty((n_simulations, len(bins)))
@@ -209,19 +208,16 @@ def ripley(
     def simulated(i: int) -> NDArrayA:
         random_i = _ppp(hull, n_simulations=1, n_observations=n_observations, rng=sim_rngs[i])
         if mode == RipleyStat.F:
-            tree_i = NearestNeighbors(metric=metric, n_neighbors=n_neigh).fit(random_i)
-            distances_i, _ = tree_i.kneighbors(random, n_neighbors=1)
-            return _f_g_function(distances_i.squeeze(), support)[1]
+            return _f_g_function(_knn_distances(random_i, random, 1, metric).squeeze(), support)[1]
         if mode == RipleyStat.G:
-            tree_i = NearestNeighbors(metric=metric, n_neighbors=n_neigh).fit(random_i)
-            distances_i, _ = tree_i.kneighbors(coordinates, n_neighbors=1)
-            return _f_g_function(distances_i.squeeze(), support)[1]
+            return _f_g_function(_knn_distances(random_i, coordinates, 1, metric).squeeze(), support)[1]
         if mode == RipleyStat.L:
             return _l_estimate(_pair_counts([random_i], support, metric, n_jobs=1), N, area)[0]
         raise NotImplementedError(f"Mode `{mode.s!r}` is not yet implemented.")
 
     # every simulation has its own generator, so they run in any order and give the same draws
-    for i, stats_i in enumerate(thread_map(simulated, range(n_simulations), n_jobs=n_jobs)):
+    sim_jobs = n_jobs if mode == RipleyStat.L else knn_jobs
+    for i, stats_i in enumerate(thread_map(simulated, range(n_simulations), n_jobs=sim_jobs)):
         for j in range(obs_arr.shape[0]):
             pvalues[j] += stats_i >= obs_arr[j]
         sims[i] = stats_i
@@ -269,6 +265,19 @@ _SCIPY_P = {
     "chebyshev": np.inf,
     "infinity": np.inf,
 }
+
+
+def _knn_distances(points: NDArrayA, queries: NDArrayA, k: int, metric: str) -> NDArrayA:
+    """Distances from every query to its ``k`` nearest ``points``, shape ``(n_queries, k)``.
+
+    scipy's :class:`~scipy.spatial.cKDTree` for the metrics it covers: it releases the GIL and is safe
+    to call from many threads. sklearn's ``NearestNeighbors`` otherwise, which callers must run
+    serially: called from ~90 threads at once, its parallel wrapper changes OpenBLAS thread limits
+    concurrently and segfaulted (1 run in 3 on a 90-core node).
+    """
+    if metric in _SCIPY_P:
+        return cKDTree(points).query(queries, k=list(range(1, k + 1)), p=_SCIPY_P[metric], workers=1)[0]
+    return NearestNeighbors(metric=metric, n_neighbors=k).fit(points).kneighbors(queries, n_neighbors=k)[0]
 
 
 def _pair_counts(coords: list[NDArrayA], support: NDArrayA, metric: str, n_jobs: int) -> NDArrayA:
