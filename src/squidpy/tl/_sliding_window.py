@@ -89,20 +89,20 @@ def sliding_window(
             f"Coordinates not found. Provide `{coord_columns}` in `adata.obs` or specify a suitable `spatial_key` in `adata.obsm`."
         )
 
-    if library_key is not None and library_key not in adata.obs:
-        raise ValueError(f"Library key '{library_key}' not found in adata.obs")
-
-    # infer window size if not provided: from the largest library's extent (of all observations without a
-    # library key), so that sections laid out side by side get windows of a section's scale
+    # infer window size if not provided
     if window_size is None:
-        by = adata.obs[library_key].to_numpy() if library_key is not None else np.zeros(len(coords), dtype=np.int8)
-        g = coords[[x_col, y_col]].groupby(by)
-        coord_range = float((g.max() - g.min()).to_numpy().max())
+        coord_range = max(
+            coords[x_col].max() - coords[x_col].min(),
+            coords[y_col].max() - coords[y_col].min(),
+        )
         # mostly arbitrary choice, except that full integers usually generate windows with 1-2 cells at the borders
         window_size = max(int(np.floor(coord_range // 3.95)), 1)
 
     if window_size <= 0:
         raise ValueError("Window size must be larger than 0.")
+
+    if library_key is not None and library_key not in adata.obs:
+        raise ValueError(f"Library key '{library_key}' not found in adata.obs")
 
     libraries = [None] if library_key is None else adata.obs[library_key].unique()
 

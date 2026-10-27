@@ -28,7 +28,6 @@ from squidpy._utils import (
 from squidpy.gr._utils import (
     _assert_categorical_obs,
     _assert_spatial_basis,
-    _rmax_rule,
     _save_data,
     extract_adata_if_sdata,
 )
@@ -123,10 +122,7 @@ def ripley(
     n_observations
         How many observations to generate for the Spatial Poisson Point Process.
     max_dist
-        Maximum distances for the support. If `None`, spatstat's rule (``rmax.rule``) with the area of
-        the convex hull: for L, a quarter of the bounding box's shorter side, but at most the radius
-        holding 1000 points around a typical point; for F and G, half the bounding box's diagonal, but
-        at most the radius by which a Poisson process of the same intensity has :math:`F(r) = 1 - 10^{{-5}}`.
+        Maximum distances for the support. If `None`, `max_dist=`:math:`\sqrt{{area \over 2}}`.
     n_steps
         Number of steps for the support.
     %(rng)s
@@ -157,7 +153,7 @@ def ripley(
     hull = ConvexHull(coordinates)
     area = hull.volume
     if max_dist is None:
-        max_dist = _rmax_rule(coordinates, area=area, nearest=mode != RipleyStat.L)
+        max_dist = (area / 2) ** 0.5
     support = np.linspace(0, max_dist, n_steps)
 
     # prepare labels

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import itertools
 from collections.abc import Sequence
 from typing import Any, Literal
 
@@ -42,7 +41,6 @@ from squidpy.gr._utils import (
     _assert_categorical_obs,
     _assert_connectivity_key,
     _assert_spatial_basis,
-    _rmax_rule,
     _save_data,
     extract_adata_if_sdata,
 )
@@ -593,9 +591,7 @@ def _occur_prob(counts: NDArrayA) -> NDArrayA:
     return occ_prob
 
 
-def _co_occurrence_helper(
-    spatial: NDArrayA, v_radium: NDArrayA, labs: NDArrayA, groups: list[NDArrayA] | None = None
-) -> NDArrayA:
+def _co_occurrence_helper(spatial: NDArrayA, v_radium: NDArrayA, labs: NDArrayA) -> NDArrayA:
     """
     Co-occurrence probabilities of every label pair at every distance threshold.
 
@@ -607,8 +603,6 @@ def _co_occurrence_helper(
          Distance thresholds (in ascending order); the first one only opens the first bin.
     labs : np.ndarray
          Cluster labels (as integers).
-    groups : list of np.ndarray, optional
-         Observation indices of each library; pairs are only counted within a library. `None`: one library.
 
     Returns
     -------
@@ -619,17 +613,7 @@ def _co_occurrence_helper(
     # indexing past k when a category is unused
     _, labs = np.unique(labs, return_inverse=True)
     k = int(labs.max()) + 1
-    if groups is None:
-        return _occur_prob(_occur_count(spatial, v_radium[1:], labs, k))
-    n_jobs = get_n_numba_threads(None)
-    if len(groups) < n_jobs:  # few libraries: one after another, each with its label pairs in parallel
-        parts = [_occur_count(spatial[g], v_radium[1:], labs[g], k) for g in groups]
-    else:  # many (small) libraries: one thread per library, largest first so the pool ends evenly
-        groups = sorted(groups, key=len, reverse=True)
-        parts = thread_map(
-            lambda g: _occur_count(spatial[g], v_radium[1:], labs[g], k, n_jobs=1), groups, n_jobs=n_jobs
-        )
-    return _occur_prob(np.sum(parts, axis=0, dtype=np.int64))
+    return _occur_prob(_occur_count(spatial, v_radium[1:], labs, k))
 
 
 @d.dedent
@@ -641,7 +625,6 @@ def co_occurrence(
     cluster_key: str,
     spatial_key: str = Key.obsm.spatial,
     interval: int | NDArrayA = 50,
-    library_key: str | None = None,
     copy: bool = False,
     table_key: str | None = None,
 ) -> tuple[NDArrayA, NDArrayA] | None:
@@ -655,16 +638,8 @@ def co_occurrence(
     %(cluster_key)s
     %(spatial_key)s
     interval
-        Distances interval at which co-occurrence is computed. If :class:`int`, that many uniformly spaced
-        thresholds, up to spatstat's rule for pair-count statistics (``rmax.rule``): a quarter of the
-        bounding box's shorter side, but at most the radius holding 1000 observations around a typical
-        one (intensity over the bounding box), so the largest distance stays local on large data.
-    library_key
-        Key in :attr:`anndata.AnnData.obs` with the library (e.g. tissue section) of each observation.
-        If given, only pairs of observations in the same library are counted, and the counts are pooled
-        over libraries before computing the probabilities: libraries that share a coordinate system are
-        never mixed. With an :class:`int` ``interval``, the upper threshold is the median over libraries
-        of each library's own rule (so one sparse or tiny library does not set it for all of them).
+        Distances interval at which co-occurrence is computed. If :class:`int`, uniformly spaced interval
+        of the given size will be used.
     %(copy)s
 
     Returns
@@ -689,32 +664,16 @@ def co_occurrence(
         # code -1 would index out of bounds in the kernel (the old per-cell dict raised KeyError)
         raise ValueError(f"`adata.obs[{cluster_key!r}]` contains missing values.")
 
-    if library_key is None:
-        groups = [np.arange(len(labs))]
-    else:
-        _assert_categorical_obs(adata, key=library_key)
-        lib = adata.obs[library_key].cat.codes.to_numpy()
-        if (lib < 0).any():
-            raise ValueError(f"`adata.obs[{library_key!r}]` contains missing values.")
-        order = np.argsort(lib, kind="stable")
-        bounds = np.searchsorted(lib[order], np.arange(lib.max() + 2))
-        groups = [order[lo:hi] for lo, hi in itertools.pairwise(bounds) if hi > lo]
-
     # create intervals thresholds
     if isinstance(interval, int):
-        # per library, so that the range is that of one library, not of all of them side by side
-        big = [g for g in groups if len(g) >= 3]
-        # median: the largest per-library value comes from the sparsest library and spans every other one
-        thresh_max = float(np.median([_rmax_rule(spatial[g]) for g in big]))
-        # the lower bound stays below the upper one, however far apart the two corner cells sit
-        thresh_min = min(min(_find_min_max(spatial[g])[0] for g in big), thresh_max / interval)
+        thresh_min, thresh_max = _find_min_max(spatial)
         interval = np.linspace(thresh_min, thresh_max, num=interval, dtype=fp)
     else:
         interval = np.array(sorted(interval), dtype=fp, copy=True)
     if len(interval) <= 1:
         raise ValueError(f"Expected interval to be of length `>= 2`, found `{len(interval)}`.")
 
-    out = _co_occurrence_helper(spatial[:, :2], interval, labs, groups)
+    out = _co_occurrence_helper(spatial[:, :2], interval, labs)
     start = logg.info(f"Calculating co-occurrence probabilities for `{len(interval)}` intervals")
 
     if copy:

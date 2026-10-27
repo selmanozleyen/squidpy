@@ -365,67 +365,6 @@ def test_co_occurrence_missing_labels_raise(adata: AnnData):
         co_occurrence(adata, cluster_key="leiden", copy=True)
 
 
-def test_co_occurrence_library_key(adata: AnnData):
-    """Two copies of one tissue side by side, one library each: the same result as the tissue alone,
-    because pairs across libraries are never counted (pooling doubles every count, not the ratios)."""
-    xy = adata.obsm[Key.obsm.spatial][:, :2]
-    shift = 10 * np.ptp(xy, axis=0).max()
-    two = AnnData(
-        obs=pd.DataFrame(
-            {
-                "leiden": pd.Categorical(np.tile(adata.obs["leiden"].to_numpy(), 2)),
-                "lib": pd.Categorical(np.repeat(["a", "b"], adata.n_obs)),
-            },
-            index=[f"{i}" for i in range(2 * adata.n_obs)],
-        ),
-        obsm={Key.obsm.spatial: np.vstack([xy, xy + shift])},
-    )
-    occ, interval = co_occurrence(adata, cluster_key="leiden", copy=True)
-    _, interval_two = co_occurrence(two, cluster_key="leiden", library_key="lib", copy=True)
-    np.testing.assert_allclose(interval_two, interval, rtol=1e-9)  # default range: that of one library
-    occ_two, _ = co_occurrence(two, cluster_key="leiden", library_key="lib", interval=interval, copy=True)
-    np.testing.assert_allclose(occ_two, occ, rtol=1e-12)
-    # without library_key the default range spans both copies
-    _, interval_mixed = co_occurrence(two, cluster_key="leiden", copy=True)
-    assert interval_mixed[-1] > 2 * interval[-1]
-
-
-def test_co_occurrence_default_interval_is_local(adata: AnnData):
-    """The default thresholds end at spatstat's rule for pair counts, not at half the diagonal."""
-    from squidpy.gr._utils import _rmax_rule
-
-    xy = adata.obsm[Key.obsm.spatial].astype(np.float32)
-    _, interval = co_occurrence(adata, cluster_key="leiden", copy=True)
-    assert interval[-1] == pytest.approx(_rmax_rule(xy), rel=1e-6)
-    assert interval[-1] < _find_min_max(xy)[1]
-    assert interval[0] < interval[-1]
-
-
-@pytest.mark.parametrize("threads", [2, 64])  # 8 libraries: one thread each, or one after another
-def test_co_occurrence_many_libraries(adata: AnnData, threads: int, monkeypatch: pytest.MonkeyPatch):
-    """Eight copies of one tissue, one library each, give the tissue's own probabilities either way the
-    libraries are scheduled."""
-    import squidpy.gr._ppatterns as pp
-
-    monkeypatch.setattr(pp, "get_n_numba_threads", lambda n_jobs=None: threads if n_jobs is None else n_jobs)
-    xy = adata.obsm[Key.obsm.spatial][:, :2]
-    shift = 2.0 ** np.ceil(np.log2(2 * np.ptp(xy, axis=0).max()))  # > any threshold apart; power of 2
-    n = 8
-    many = AnnData(
-        obs=pd.DataFrame(
-            {
-                "leiden": pd.Categorical(np.tile(adata.obs["leiden"].to_numpy(), n)),
-                "lib": pd.Categorical(np.repeat([f"l{i}" for i in range(n)], adata.n_obs)),
-            },
-            index=[f"{i}" for i in range(n * adata.n_obs)],
-        ),
-        obsm={Key.obsm.spatial: np.vstack([xy + shift * np.array([i % 3, i // 3]) for i in range(n)])},
-    )
-    occ, interval = co_occurrence(adata, cluster_key="leiden", copy=True)
-    occ_many, _ = co_occurrence(many, cluster_key="leiden", library_key="lib", interval=interval, copy=True)
-    np.testing.assert_allclose(occ_many, occ, rtol=1e-12)
-
-
 @pytest.mark.parametrize("size", [1, 3])
 def test_co_occurrence_explicit_interval(adata: AnnData, size: int):
     minn, maxx = _find_min_max(adata.obsm[Key.obsm.spatial])
