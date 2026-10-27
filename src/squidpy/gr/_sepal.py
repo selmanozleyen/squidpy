@@ -18,7 +18,7 @@ from tqdm.auto import tqdm
 from squidpy._compat import old_positionals
 from squidpy._constants._pkg_constants import Key
 from squidpy._docs import d, inject_docs
-from squidpy._utils import NDArrayA, deprecated_params, get_n_numba_threads, memory_budget
+from squidpy._utils import NDArrayA, deprecated_params, get_n_numba_threads, memory_budget, thread_map
 from squidpy._validators import assert_non_empty_sequence
 from squidpy.gr._utils import (
     _assert_connectivity_key,
@@ -187,6 +187,10 @@ def sepal(
 # 8 bytes each per spot and gene. The default budget's floor (see `memory_budget`); an eighth of
 # free memory is used when larger, since the per-gene entropy sums run in parallel over a block.
 _BLOCK_BYTES = 4 * 2**30
+# Spots per thread below which the threads take genes instead of spots: each step of the block kernel
+# ends in a barrier across all threads, which on a few thousand spots (regular Visium) costs more than
+# the step itself, so there each thread runs whole genes on its own (as before the block kernel).
+_SPOTS_PER_THREAD = 1000
 
 
 def _diffusion_genes(
@@ -212,18 +216,36 @@ def _diffusion_genes(
     arithmetic of a run on its own and stops at its own step.
     """
     n_spots, n_genes = vals.shape
-    block = int(max(1, min(n_genes, memory_budget(working_memory, floor=_BLOCK_BYTES) // (24 * n_spots))))
     scores = np.empty(n_genes)
+
+    def run(idx: NDArrayA, kernel=_diffusion) -> NDArrayA:  # type: ignore[no-untyped-def]
+        cols = vals[:, idx]
+        conc = np.ascontiguousarray(cols.toarray() if issparse(cols) else cols, dtype=np.float64)
+        return kernel(conc, use_hex, n_iter, sat, sat_idx, unsat, unsat_idx, dt, thresh)
+
+    if n_spots < _SPOTS_PER_THREAD * n_jobs:  # few spots: whole genes per thread, no per-step barriers
+        groups = [g for g in np.array_split(np.arange(n_genes), n_jobs) if len(g)]
+        # the serial build: a parallel=True kernel must not be entered from several threads at once
+        runs = thread_map(
+            lambda idx: run(idx, _diffusion_serial),
+            groups,
+            n_jobs=len(groups),
+            show_progress_bar=show_progress_bar,
+            unit="gene group",
+        )
+        for idx, steps in zip(groups, runs, strict=True):
+            scores[idx] = dt * steps
+        return scores
+
+    block = int(max(1, min(n_genes, memory_budget(working_memory, floor=_BLOCK_BYTES) // (24 * n_spots))))
     prev_threads = numba.get_num_threads()
     numba.set_num_threads(n_jobs)
     try:
         with tqdm(total=n_genes, unit="gene", disable=not show_progress_bar) as pbar:
             for start in range(0, n_genes, block):
-                cols = vals[:, start : start + block]
-                conc = np.ascontiguousarray(cols.toarray() if issparse(cols) else cols, dtype=np.float64)
-                steps = _diffusion(conc, use_hex, n_iter, sat, sat_idx, unsat, unsat_idx, dt, thresh)
-                scores[start : start + block] = dt * steps
-                pbar.update(conc.shape[1])
+                idx = np.arange(start, min(start + block, n_genes))
+                scores[idx] = dt * run(idx)
+                pbar.update(len(idx))
     finally:
         numba.set_num_threads(prev_threads)
     return scores
@@ -330,6 +352,10 @@ def _diffusion(  # noqa: PLR0917, numba requires positional arguments
             break
 
     return settled
+
+
+# the same kernel without threads (prange runs as range): many of these run side by side, one per thread
+_diffusion_serial = njit(fastmath=True, nogil=True)(_diffusion.py_func)
 
 
 def _compute_idxs(
