@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 from anndata import AnnData
 
@@ -118,3 +119,63 @@ def test_ripley_rng(adata_ripley: AnnData, mode: str):
     # regression: simulations must not all be identical to each other
     # (previously every simulation reused the same seed and produced the same point pattern)
     assert not np.allclose(sims1, sims1[:, [0]])
+
+
+def test_ppp_batches_match_pointwise_sampling():
+    """Batched rejection sampling yields the points of a point-by-point loop over the same generator."""
+    from scipy.spatial import ConvexHull, Delaunay
+
+    from squidpy.gr._ripley import _ppp
+
+    pts = np.random.default_rng(1).normal(size=(200, 2)) * [3, 1]  # elongated hull: many rejections
+    hull = ConvexHull(pts)
+    vxs = hull.points[hull.vertices]
+    deln, bbox = Delaunay(vxs), np.array([*vxs.min(0), *vxs.max(0)])
+
+    for n_obs in (1, 37, 1000):
+        ref_rng, rng = np.random.default_rng(7), np.random.default_rng(7)
+        expected = []
+        while len(expected) < n_obs:
+            x, y = ref_rng.uniform(bbox[0], bbox[2]), ref_rng.uniform(bbox[1], bbox[3])
+            if deln.find_simplex((x, y)) >= 0:
+                expected.append((x, y))
+        got = _ppp(hull, n_simulations=1, n_observations=n_obs, rng=rng)
+        np.testing.assert_array_equal(got, np.reshape(expected, (1, n_obs, 2)))
+
+
+@pytest.mark.parametrize("mode", ["F", "G"])
+def test_ripley_tiny_cluster_raises(adata_ripley: AnnData, mode: str):
+    """F and G need n_neigh points in every cluster; a smaller one is named in a clear error."""
+    adata = adata_ripley.copy()
+    labels = adata.obs[CLUSTER_KEY].astype(str).to_numpy()
+    labels[0] = "tiny"
+    adata.obs[CLUSTER_KEY] = pd.Categorical(labels)
+    with pytest.raises(ValueError, match=r"`tiny` has 1\. Remove these clusters or lower `n_neigh`"):
+        ripley(adata, cluster_key=CLUSTER_KEY, mode=mode, n_simulations=2, copy=True)
+    ripley(adata, cluster_key=CLUSTER_KEY, mode=mode, n_neigh=1, n_simulations=2, copy=True)  # fits again
+
+
+@pytest.mark.parametrize("metric", ["euclidean", "manhattan", "chebyshev"])
+@pytest.mark.parametrize("k", [1, 2])
+def test_knn_distances_match_sklearn(metric: str, k: int):
+    """scipy's thread-safe nearest-neighbour path gives sklearn's distances."""
+    from sklearn.neighbors import NearestNeighbors
+
+    from squidpy.gr._ripley import _knn_distances
+
+    rng = np.random.default_rng(0)
+    points, queries = rng.uniform(0, 100, (500, 2)), rng.uniform(0, 100, (300, 2))
+    expected = NearestNeighbors(metric=metric, n_neighbors=k).fit(points).kneighbors(queries, n_neighbors=k)[0]
+    np.testing.assert_allclose(_knn_distances(points, queries, k, metric).reshape(300, k), expected, rtol=1e-12)
+
+
+@pytest.mark.parametrize("mode", ["F", "G", "L"])
+def test_ripley_n_jobs_invariant(adata_ripley: AnnData, mode: str):
+    """The result does not depend on the number of threads."""
+    kw = {"cluster_key": CLUSTER_KEY, "mode": mode, "n_simulations": 5, "rng": 0, "copy": True}
+    serial, threaded = ripley(adata_ripley, n_jobs=1, **kw), ripley(adata_ripley, n_jobs=4, **kw)
+    for key in serial:
+        if isinstance(serial[key], pd.DataFrame):
+            pd.testing.assert_frame_equal(serial[key], threaded[key])
+        else:
+            np.testing.assert_array_equal(serial[key], threaded[key])
