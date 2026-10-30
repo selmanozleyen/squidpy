@@ -71,10 +71,6 @@ def sliding_window(
 
     adata = extract_adata_if_sdata(adata, table_key=table_key)
 
-    # we don't want to modify the original adata in case of copy=True
-    if copy:
-        adata = adata.copy()
-
     # extract coordinates of observations
     x_col, y_col = coord_columns
     if x_col in adata.obs and y_col in adata.obs:
@@ -105,79 +101,56 @@ def sliding_window(
     if library_key is not None and library_key not in adata.obs:
         raise ValueError(f"Library key '{library_key}' not found in adata.obs")
 
-    libraries = [None] if library_key is None else adata.obs[library_key].unique()
-
-    # Create a DataFrame to store the sliding window assignments
-    sliding_window_df = pd.DataFrame(index=adata.obs.index)
-
+    # per library, cells sorted by x; each window binary-searches its x-range
     if sliding_window_key in adata.obs:
         logg.warning(f"Overwriting existing column '{sliding_window_key}' in adata.obs.")
+    x_all, y_all = coords[x_col].to_numpy(), coords[y_col].to_numpy()
+    labels = np.full(len(coords), np.nan, dtype=object) if overlap == 0 else None  # one label per cell
+    columns: dict[str, np.ndarray] = {}  # overlap > 0: one membership column per window
+    cells_of = (
+        {None: np.arange(len(coords))}
+        if library_key is None
+        else adata.obs.groupby(library_key, observed=True, sort=False).indices
+    )
 
-    for lib in libraries:
-        if lib is not None:
-            lib_mask = adata.obs[library_key] == lib
-            lib_coords = coords.loc[lib_mask]
-        else:
-            lib_mask = np.ones(len(adata), dtype=bool)
-            lib_coords = coords
-
-        min_x, max_x = lib_coords[x_col].min(), lib_coords[x_col].max()
-        min_y, max_y = lib_coords[y_col].min(), lib_coords[y_col].max()
-
-        # precalculate windows
+    for lib, lib_pos in cells_of.items():
+        x, y = x_all[lib_pos], y_all[lib_pos]
         windows = _calculate_window_corners(
-            min_x=min_x,
-            max_x=max_x,
-            min_y=min_y,
-            max_y=max_y,
+            min_x=np.nanmin(x),
+            max_x=np.nanmax(x),
+            min_y=np.nanmin(y),
+            max_y=np.nanmax(y),
             window_size=window_size,
             overlap=overlap,
             drop_partial_windows=drop_partial_windows,
         )
-
+        by_x = np.argsort(x, kind="stable")
+        x_sorted = x[by_x]
         lib_key = f"{lib}_" if lib is not None else ""
 
-        # assign observations to windows
-        for idx, window in windows.iterrows():
-            x_start = window["x_start"]
-            x_end = window["x_end"]
-            y_start = window["y_start"]
-            y_end = window["y_end"]
-
-            mask = (
-                (lib_coords[x_col] >= x_start)
-                & (lib_coords[x_col] <= x_end)
-                & (lib_coords[y_col] >= y_start)
-                & (lib_coords[y_col] <= y_end)
-            )
-            obs_indices = lib_coords.index[mask]
-
+        for idx, (x_start, x_end, y_start, y_end) in enumerate(windows.itertuples(index=False)):
+            cand = by_x[np.searchsorted(x_sorted, x_start, "left") : np.searchsorted(x_sorted, x_end, "right")]
+            inside = lib_pos[cand[(y[cand] >= y_start) & (y[cand] <= y_end)]]
             if overlap == 0:
-                mask = (
-                    (lib_coords[x_col] >= x_start)
-                    & (lib_coords[x_col] <= x_end)
-                    & (lib_coords[y_col] >= y_start)
-                    & (lib_coords[y_col] <= y_end)
-                )
-                obs_indices = lib_coords.index[mask]
-                sliding_window_df.loc[obs_indices, sliding_window_key] = f"{lib_key}window_{idx}"
-
+                labels[inside] = f"{lib_key}window_{idx}"  # windows share edges: the later one wins
             else:
-                col_name = f"{sliding_window_key}_{lib_key}window_{idx}"
-                sliding_window_df.loc[obs_indices, col_name] = True
-                # Avoid chained assignment for pandas CoW compatibility
-                sliding_window_df[col_name] = sliding_window_df[col_name].fillna(False)
+                member = np.zeros(len(coords), dtype=bool)
+                member[inside] = True
+                columns[f"{sliding_window_key}_{lib_key}window_{idx}"] = member
 
     if overlap == 0:
-        # create categorical variable for ordered windows
-        sliding_window_df[sliding_window_key] = pd.Categorical(
-            sliding_window_df[sliding_window_key],
-            ordered=True,
-            categories=sorted(
-                sliding_window_df[sliding_window_key].unique(),
-                key=lambda x: int(x.split("_")[-1]),
-            ),
+        # ordered categorical of the windows that received cells; cells outside every window stay NaN
+        assigned = pd.unique(labels[pd.notna(labels)])
+        sliding_window_df = pd.DataFrame(
+            {
+                sliding_window_key: pd.Categorical(
+                    labels, ordered=True, categories=sorted(assigned, key=lambda x: int(x.split("_")[-1]))
+                )
+            },
+            index=adata.obs.index,
         )
+    else:
+        sliding_window_df = pd.DataFrame(columns, index=adata.obs.index)
 
     sliding_window_df[x_col] = coords[x_col]
     sliding_window_df[y_col] = coords[y_col]
