@@ -9,7 +9,7 @@ from pandas.testing import assert_frame_equal
 
 from squidpy._constants._pkg_constants import Key
 from squidpy.gr import co_occurrence, spatial_autocorr
-from squidpy.gr._ppatterns import _autocorr_perms, _find_min_max, _score_perms
+from squidpy.gr._ppatterns import _autocorr_perms, _find_min_max, _occur_count, _score_perms
 
 MORAN_K = "moranI"
 GEARY_C = "gearyC"
@@ -270,6 +270,29 @@ def test_co_occurrence_reproducibility(adata: AnnData):
 
     np.testing.assert_array_equal(sorted(interval_1), sorted(interval_2))
     np.testing.assert_allclose(arr_1, arr_2)
+
+
+def test_co_occurrence_matches_brute_force(adata: AnnData):
+    """Pair counts equal a direct count over all pairs; an unused category keeps its row and column."""
+    cats = adata.obs["leiden"].cat.categories
+    adata.obs["leiden"] = adata.obs["leiden"].cat.add_categories("unused").cat.reorder_categories(["unused", *cats])
+    occ, interval = co_occurrence(adata, cluster_key="leiden", copy=True)
+
+    xy = adata.obsm[Key.obsm.spatial].astype(np.float64)
+    labs = adata.obs["leiden"].cat.codes.to_numpy()
+    k = len(cats) + 1
+    d2 = ((xy[:, None] - xy[None]) ** 2).sum(-1)
+    np.fill_diagonal(d2, np.inf)
+    pair = labs[:, None] * k + labs[None, :]
+    counts = np.stack([np.bincount(pair[d2 <= t * t], minlength=k * k).reshape(k, k) for t in interval[1:]], axis=-1)
+    np.testing.assert_array_equal(_occur_count(xy, interval[1:], labs, k, n_jobs=1), counts)
+    np.testing.assert_array_equal(co_occurrence(adata, cluster_key="leiden", copy=True, n_jobs=4)[0], occ)
+
+    row = counts.sum(axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):  # empty bins are 0 in the output
+        expected = counts.transpose(1, 0, 2) / row[None] / (row / row.sum(axis=0))[:, None]
+    np.testing.assert_allclose(occ, np.nan_to_num(expected, nan=0.0, posinf=0.0))
+    assert not occ[0].any() and not occ[:, 0].any()  # the unused category co-occurs with nothing
 
 
 def test_co_occurrence_missing_labels_raise(adata: AnnData):
