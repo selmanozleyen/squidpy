@@ -13,11 +13,12 @@ from pandas import CategoricalDtype, Series
 from pandas.api.types import infer_dtype
 from scanpy import logging as logg
 from scipy.sparse import csc_matrix, csr_matrix, spmatrix
+from scipy.spatial import cKDTree
 from spatialdata import SpatialData
 
 from squidpy._compat import ArrayView, SparseCSCView, SparseCSRView
 from squidpy._docs import d
-from squidpy._utils import NDArrayA
+from squidpy._utils import NDArrayA, thread_map
 from squidpy._validators import assert_non_empty_sequence
 
 
@@ -192,3 +193,42 @@ def _group_offsets(cats: Series) -> tuple[NDArrayA, NDArrayA]:
     members = [np.asarray(per_group.get(c, ()), dtype=np.int64) for c in cats.cat.categories]
     offsets = np.concatenate(([0], np.cumsum([len(m) for m in members]))).astype(np.int64)
     return offsets, np.concatenate(members) if members else np.empty(0, dtype=np.int64)
+
+
+# query points per chunk below which a query set is counted in one piece
+_PAIR_CHUNK = 20_000
+
+
+def _count_pairs(
+    sets: Sequence[NDArrayA], pairs: Sequence[tuple[int, int]], radii: NDArrayA, *, p: float, n_jobs: int
+) -> NDArrayA:
+    """Ordered pairs of distinct points within each of ``radii``, one row per ``(a, b)`` in ``pairs``.
+
+    Counts points of ``sets[a]`` against points of ``sets[b]`` with scipy's dual-tree
+    :meth:`~scipy.spatial.cKDTree.count_neighbors` (Minkowski ``p``, ``distance <= r``, cumulative over
+    ``radii``), without materializing pairwise distances. Both tree building and counting release the
+    GIL, so they run in ``n_jobs`` threads; large query sets are cut into x-sorted chunks so that one
+    big pair still uses every thread.
+    """
+    trees = thread_map(cKDTree, sets, n_jobs=n_jobs)
+    work = [
+        (i, chunk)
+        for i, (a, _) in enumerate(pairs)
+        for chunk in np.array_split(
+            np.argsort(sets[a][:, 0], kind="stable"), max(1, min(n_jobs, len(sets[a]) // _PAIR_CHUNK))
+        )
+    ]
+
+    def count(item: tuple[int, NDArrayA]) -> tuple[int, NDArrayA]:
+        i, chunk = item
+        a, b = pairs[i]
+        query = trees[a] if len(chunk) == len(sets[a]) else cKDTree(sets[a][chunk])
+        return i, query.count_neighbors(trees[b], radii, p=p, cumulative=True)
+
+    counts = np.zeros((len(pairs), len(radii)), dtype=np.int64)
+    for i, c in thread_map(count, work, n_jobs=n_jobs):
+        counts[i] += c
+    for i, (a, b) in enumerate(pairs):
+        if a == b:
+            counts[i] -= len(sets[a])  # each point is at distance 0 from itself
+    return counts
