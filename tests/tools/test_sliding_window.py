@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import numpy as np
+import pandas as pd
 import pytest
 from anndata import AnnData
 
@@ -85,6 +87,45 @@ class TestSlidingWindow:
                 assert (
                     f"{sliding_window_key}_window_{i}" in df.columns
                 )  # correct number of columns; multiple sliding windows
+
+    def test_sliding_window_matches_brute_force(self, adata_squaregrid: AnnData):
+        """Membership equals checking every cell against every window; overlap columns are bool."""
+        xy = adata_squaregrid.obsm["spatial"]
+        win = _calculate_window_corners(xy[:, 0].min(), xy[:, 0].max(), xy[:, 1].min(), xy[:, 1].max(), 5, overlap=2)
+        obs_before = adata_squaregrid.obs.copy()
+        df = sliding_window(adata_squaregrid, window_size=5, overlap=2, coord_columns=("globalX", "globalY"), copy=True)
+        pd.testing.assert_frame_equal(adata_squaregrid.obs, obs_before)  # copy=True leaves adata untouched
+        for i, (x0, x1, y0, y1) in enumerate(win.itertuples(index=False)):
+            col = df[f"sliding_window_assignment_window_{i}"]
+            assert col.dtype == bool
+            inside = (xy[:, 0] >= x0) & (xy[:, 0] <= x1) & (xy[:, 1] >= y0) & (xy[:, 1] <= y1)
+            np.testing.assert_array_equal(col.to_numpy(), inside)
+
+    def test_sliding_window_libraries_match_brute_force(self, adata_mibitof: AnnData):
+        """overlap == 0 with libraries: each cell gets its library's last window containing it."""
+        df = sliding_window(adata_mibitof, library_key="library_id", window_size=300, copy=True)
+        xy, libs = adata_mibitof.obsm["spatial"], adata_mibitof.obs["library_id"].to_numpy()
+        expected = np.full(len(libs), np.nan, dtype=object)
+        for lib in pd.unique(libs):
+            m = libs == lib
+            x, y = xy[m, 0], xy[m, 1]
+            win = _calculate_window_corners(x.min(), x.max(), y.min(), y.max(), 300, overlap=0)
+            for i, (x0, x1, y0, y1) in enumerate(win.itertuples(index=False)):
+                expected[np.flatnonzero(m)[(x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)]] = f"{lib}_window_{i}"
+        np.testing.assert_array_equal(df["sliding_window_assignment"].astype(object).to_numpy(), expected)
+
+    def test_sliding_window_drop_partial_leaves_cells_unassigned(self, adata_squaregrid: AnnData):
+        """Cells outside every full window stay NaN."""
+        df = sliding_window(
+            adata_squaregrid,
+            window_size=4,
+            drop_partial_windows=True,
+            coord_columns=("globalX", "globalY"),
+            copy=True,
+        )
+        col = df["sliding_window_assignment"]
+        assert col.isna().any() and col.notna().any()
+        assert list(col.cat.categories) == sorted(col.cat.categories, key=lambda c: int(c.split("_")[-1]))
 
     def test_sliding_window_invalid_window_size(
         self,
