@@ -10,7 +10,7 @@ import numba.types as nt
 import numpy as np
 import pandas as pd
 from anndata import AnnData
-from numba import njit, prange
+from numba import njit
 from numba_progress import ProgressBar
 from scanpy import logging as logg
 from scanpy.metrics import gearys_c, morans_i
@@ -39,6 +39,7 @@ from squidpy.gr._utils import (
     _assert_categorical_obs,
     _assert_connectivity_key,
     _assert_spatial_basis,
+    _count_pairs,
     _save_data,
     extract_adata_if_sdata,
 )
@@ -499,93 +500,61 @@ def _score_perms(
     }
 
 
-@njit(parallel=True, fastmath=True, cache=True)
-def _occur_count(  # noqa: PLR0917, numba requires positional arguments
-    spatial_x: NDArrayA, spatial_y: NDArrayA, thresholds: NDArrayA, label_idx: NDArrayA, n: int, k: int, l_val: int
-) -> NDArrayA:
-    # Allocate a 2D array to store a flat local result per point.
-    k2 = k * k
-    local_results = np.zeros((n, l_val * k2), dtype=np.int32)
-
-    for i in prange(n):
-        for j in range(n):
-            if i == j:
-                continue
-            dx = spatial_x[i] - spatial_x[j]
-            dy = spatial_y[i] - spatial_y[j]
-            d2 = dx * dx + dy * dy
-
-            pair = label_idx[i] * k + label_idx[j]  # fixed in r-loop
-            base = pair * l_val  # first cell for that pair
-
-            for r in range(l_val):
-                if d2 <= thresholds[r]:
-                    local_results[i][base + r] += 1
-
-    # reduction and reshape stay the same
-    result_flat = local_results.sum(axis=0)
-    result: NDArrayA = result_flat.reshape(k, k, l_val)
-
-    return result
+def _occur_count(spatial: NDArrayA, thresholds: NDArrayA, labs: NDArrayA, k: int, n_jobs: int) -> NDArrayA:
+    """Count ordered pairs ``i != j`` with ``|x_i - x_j| <= thresholds[r]``, per label pair and threshold."""
+    order = np.argsort(labs, kind="stable")
+    groups = np.split(spatial[order], np.cumsum(np.bincount(labs, minlength=k))[:-1])
+    pairs = [(a, b) for a in range(k) for b in range(a, k)]  # counts are symmetric in the label pair
+    pair_counts = _count_pairs(groups, pairs, thresholds, p=2, n_jobs=n_jobs)
+    counts = np.zeros((k, k, len(thresholds)), dtype=np.int64)
+    for (a, b), c in zip(pairs, pair_counts, strict=True):
+        counts[a, b] = counts[b, a] = c
+    return counts
 
 
-@njit(parallel=True, fastmath=True, cache=True)
-def _co_occurrence_helper(v_x: NDArrayA, v_y: NDArrayA, v_radium: NDArrayA, labs: NDArrayA) -> NDArrayA:
+def _occur_prob(counts: NDArrayA) -> NDArrayA:
+    """Co-occurrence ratio ``p(i | c, r) / p(i | r)`` from the pair counts; 0 where a cluster has no pairs."""
+    row = counts.sum(axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        occ = counts.transpose(1, 0, 2) / row[None] / (row / row.sum(axis=0))[:, None]
+    return np.nan_to_num(occ, nan=0.0, posinf=0.0)
+
+
+def _co_occurrence_helper(spatial: NDArrayA, v_radium: NDArrayA, labs: NDArrayA, k: int, n_jobs: int) -> NDArrayA:
     """
-    Fast co-occurrence probability computation using the new numba-accelerated counting.
+    Co-occurrence probabilities of every label pair at every distance threshold.
 
     Parameters
     ----------
-    v_x : np.ndarray, float64
-         x-coordinates.
-    v_y : np.ndarray, float64
-         y-coordinates.
+    spatial : np.ndarray, float64
+         ``(n, 2)`` coordinates.
     v_radium : np.ndarray, float64
-         Distance thresholds (in ascending order).
+         Distance thresholds (in ascending order); the first one only opens the first bin.
     labs : np.ndarray
-         Cluster labels (as integers).
+         Cluster labels, ``0 .. k - 1``.
+    k : int
+         Number of clusters (categories, used or not).
+    n_jobs : int
+         Number of threads.
 
     Returns
     -------
     occ_prob : np.ndarray
          A 3D array of shape (k, k, len(v_radium)-1) containing the co-occurrence probabilities.
-    labs_unique : np.ndarray
-         Array of unique labels.
     """
-    n = len(v_x)
-    labs_unique = np.unique(labs)
-    k = len(labs_unique)
-    # l_val is the number of bins; here we assume the thresholds come from v_radium[1:].
-    l_val = len(v_radium) - 1
-    # Compute squared thresholds from the interval (skip the first value)
-    thresholds = (v_radium[1:]) ** 2
-
-    # Compute co-occurence counts.
-    counts = _occur_count(v_x, v_y, thresholds, labs, n, k, l_val)
-
-    occ_prob = np.zeros((k, k, l_val), dtype=np.float64)
-    row_sums = counts.sum(axis=0)
-    totals = row_sums.sum(axis=0)
-
-    for r in prange(l_val):
-        probs = row_sums[:, r] / totals[r]
-        for c in range(k):
-            for i in range(k):
-                if probs[i] != 0.0 and row_sums[c, r] != 0.0:
-                    occ_prob[i, c, r] = (counts[c, i, r] / row_sums[c, r]) / probs[i]
-
-    return occ_prob
+    return _occur_prob(_occur_count(spatial, v_radium[1:], labs, k, n_jobs))
 
 
 @d.dedent
 @old_positionals("cluster_key", "spatial_key", "interval", "copy")
-@deprecated_params({"n_splits": "1.10.0", "n_jobs": "1.10.0", "backend": "1.10.0", "show_progress_bar": "1.10.0"})
+@deprecated_params({"n_splits": "1.10.0", "backend": "1.10.0", "show_progress_bar": "1.10.0"})
 def co_occurrence(
     adata: AnnData | SpatialData,
     *,
     cluster_key: str,
     spatial_key: str = Key.obsm.spatial,
     interval: int | NDArrayA = 50,
+    n_jobs: int | None = None,
     copy: bool = False,
     table_key: str | None = None,
 ) -> tuple[NDArrayA, NDArrayA] | None:
@@ -601,6 +570,7 @@ def co_occurrence(
     interval
         Distances interval at which co-occurrence is computed. If :class:`int`, uniformly spaced interval
         of the given size will be used.
+    %(n_jobs_threads)s
     %(copy)s
 
     Returns
@@ -634,12 +604,9 @@ def co_occurrence(
     if len(interval) <= 1:
         raise ValueError(f"Expected interval to be of length `>= 2`, found `{len(interval)}`.")
 
-    spatial_x = spatial[:, 0]
-    spatial_y = spatial[:, 1]
-
-    # Compute co-occurrence probabilities using the fast numba routine.
-    out = _co_occurrence_helper(spatial_x, spatial_y, interval, labs)
     start = logg.info(f"Calculating co-occurrence probabilities for `{len(interval)}` intervals")
+    n_jobs = get_n_numba_threads(n_jobs)
+    out = _co_occurrence_helper(spatial[:, :2], interval, labs, len(original_clust.cat.categories), n_jobs)
 
     if copy:
         logg.info("Finish", time=start)
