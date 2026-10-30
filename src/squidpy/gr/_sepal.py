@@ -1,21 +1,30 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from functools import partial
 from typing import Literal
 
 import numpy as np
 import pandas as pd
 from anndata import AnnData
-from numba import njit
+from numba import njit, prange
+from numba_progress import ProgressBar
 from scanpy import logging as logg
 from scipy.sparse import csc_matrix, csr_matrix, issparse, isspmatrix_csr, spmatrix
-from sklearn.metrics import pairwise_distances
+from scipy.spatial import cKDTree
 from spatialdata import SpatialData
 
 from squidpy._compat import old_positionals
 from squidpy._constants._pkg_constants import Key
 from squidpy._docs import d, inject_docs
-from squidpy._utils import NDArrayA, deprecated_params, get_n_numba_threads, thread_map
+from squidpy._utils import (
+    NDArrayA,
+    deprecated_params,
+    get_n_numba_threads,
+    memory_budget,
+    numba_threads,
+    thread_map,
+)
 from squidpy._validators import assert_non_empty_sequence
 from squidpy.gr._utils import (
     _assert_connectivity_key,
@@ -59,6 +68,7 @@ def sepal(
     use_raw: bool = False,
     copy: bool = False,
     n_jobs: int | None = None,
+    working_memory: int | str | None = None,
     show_progress_bar: bool = True,
     table_key: str | None = None,
 ) -> pd.DataFrame | None:
@@ -98,6 +108,8 @@ def sepal(
         Whether to access :attr:`anndata.AnnData.raw`.
     %(copy)s
     %(n_jobs_threads)s
+    %(working_memory)s
+        Here: the genes simulated at once, each needing 16 bytes per spot.
     %(show_progress_bar)s
     Returns
     -------
@@ -138,7 +150,7 @@ def sepal(
         raise ValueError(f"Expected `max_neighs={max_neighs}`, found node with `{max_n}` neighbors.")
 
     # get saturated/unsaturated nodes
-    sat, sat_idx, unsat, unsat_idx = _compute_idxs(g, spatial, max_neighs, "l1")
+    sat, sat_idx, unsat, unsat_idx = _compute_idxs(g, spatial, max_neighs)
 
     # get counts
     vals, genes = _extract_expression(adata, genes=genes, use_raw=use_raw, layer=layer)
@@ -159,6 +171,7 @@ def sepal(
         dt=dt,
         thresh=thresh,
         n_jobs=n_jobs,
+        working_memory=working_memory,
         show_progress_bar=show_progress_bar,
     )
 
@@ -176,6 +189,11 @@ def sepal(
     _save_data(adata, attr="uns", key=key_added, data=sepal_score, time=start)
 
 
+# Below this many spots per thread, each thread simulates its own genes with the serial kernel: the
+# parallel kernel synchronizes all threads every step, which costs more than a step on small grids.
+_SPOTS_PER_THREAD = 1000
+
+
 def _diffusion_genes(
     vals: NDArrayA | spmatrix,
     *,
@@ -188,41 +206,50 @@ def _diffusion_genes(
     dt: float,
     thresh: float,
     n_jobs: int,
+    working_memory: int | str | None,
     show_progress_bar: bool = True,
 ) -> NDArrayA:
-    """Run diffusion for each gene column, parallelised across threads."""
+    """Run the diffusion for every gene column, a block of genes at a time.
 
-    sparse = issparse(vals)
+    A block is a ``(spots, genes)`` array advanced together; each gene still does exactly the
+    arithmetic of a run on its own and stops at its own step. On large grids the blocks run one after
+    another, each in parallel over spots; on small grids ``n_jobs`` blocks run side by side, one per
+    thread. Either way the blocks held at once fit in ``working_memory``.
+    """
+    n_spots, n_genes = vals.shape
+    side_by_side = n_spots < _SPOTS_PER_THREAD * n_jobs
+    at_once = n_jobs if side_by_side else 1
+    # a block holds its genes' concentrations and Laplacians, 8 bytes each per spot
+    budget = memory_budget(working_memory)
+    block = int(np.clip(budget // (16 * n_spots * at_once), 1, -(-n_genes // at_once)))
+    blocks = [np.arange(i, min(i + block, n_genes)) for i in range(0, n_genes, block)]
 
-    def _process_gene(i: int) -> float:
-        if sparse:
-            conc = np.ascontiguousarray(vals[:, i].toarray().ravel(), dtype=np.float64)
-        else:
-            conc = np.ascontiguousarray(vals[:, i], dtype=np.float64)
-        time_iter = _diffusion(
-            conc,
-            use_hex,
-            n_iter,
-            sat,
-            sat_idx,
-            unsat,
-            unsat_idx,
-            dt,
-            thresh,
+    def run(kernel: Callable[..., NDArrayA], idx: NDArrayA) -> NDArrayA:
+        cols = vals[:, idx]
+        conc = np.ascontiguousarray(cols.toarray() if issparse(cols) else cols, dtype=np.float64)
+        return kernel(conc, use_hex, n_iter, sat, sat_idx, unsat, unsat_idx, dt, thresh)
+
+    if side_by_side:  # n_jobs threads, each running the serial kernel on its own blocks
+        steps = thread_map(
+            partial(run, _diffusion_serial),
+            blocks,
+            n_jobs=n_jobs,
+            show_progress_bar=show_progress_bar,
+            unit="gene block",
         )
-        return dt * time_iter
+    else:  # one block at a time, the kernel itself parallel over spots on n_jobs threads
+        steps = []
+        with (
+            numba_threads(n_jobs),
+            ProgressBar(total=len(blocks), unit="gene block", disable=not show_progress_bar) as pbar,
+        ):
+            for idx in blocks:
+                steps.append(run(_diffusion, idx))
+                pbar.update(1)
+    return dt * np.concatenate(steps)
 
-    scores = thread_map(
-        _process_gene,
-        range(vals.shape[1]),
-        n_jobs=n_jobs,
-        show_progress_bar=show_progress_bar,
-        unit="gene",
-    )
-    return np.array(scores)
 
-
-@njit(fastmath=True, nogil=True)
+@njit(parallel=True, fastmath=True, nogil=True)
 def _diffusion(  # noqa: PLR0917, numba requires positional arguments
     conc: NDArrayA,
     use_hex: bool,
@@ -233,108 +260,121 @@ def _diffusion(  # noqa: PLR0917, numba requires positional arguments
     unsat_idx: NDArrayA,
     dt: float,
     thresh: float,
-) -> float:
-    """Simulate diffusion process on a regular graph."""
-    sat_shape = sat.shape[0]
-    n_cells = conc.shape[0]
-    entropy_arr = np.zeros(n_iter)
-    nhood = np.zeros(sat_shape)
-    dcdt = np.zeros(n_cells)
-    prev_ent = 1.0
+) -> NDArrayA:
+    """Simulate diffusion on a regular graph for a ``(spots, genes)`` block, modified in place.
+
+    ``unsat_idx`` gives, for every unsaturated spot, the position in ``sat`` of the saturated spot it follows.
+
+    Returns, per gene, the step at which the entropy settled (NaN if it did not within ``n_iter``).
+    Each step computes every Laplacian from the previous state before updating. Everything runs in
+    parallel over spots, the two entropy sums too: they add fixed-size chunks of spots in parallel
+    and then the chunk partials in chunk order, so the result depends on the grid only, never on the
+    thread count or the block a gene is in. Nothing is allocated per step.
+
+    Stencils and entropy follow https://github.com/almaan/sepal/blob/master/sepal/models.py; the
+    hexagonal 7-point stencil is from Benster, Kantorovich & Krylov, *Approximate Methods of Higher
+    Analysis* (ISBN 978-0486821603), the rectangular one is the 5-point stencil.
+    """
+    n_spots, n_genes = conc.shape
+    n_sat, n_nbrs = sat_idx.shape
+    eps = np.finfo(np.float64).eps
+    work = np.empty((n_sat, n_genes))  # Laplacian at each saturated spot
+    xs = np.empty(n_genes)
+    chunk = max(16384, -(-n_sat // 1024))  # at most 1024 partial sums, set by the grid alone
+    n_chunks = -(-n_sat // chunk)
+    partial = np.empty((n_chunks, n_genes))
+    prev_ent = np.ones(n_genes)
+    active = np.ones(n_genes, dtype=np.bool_)
+    settled = np.full(n_genes, np.nan)
 
     for i in range(n_iter):
-        for j in range(sat_shape):
-            nhood[j] = np.sum(conc[sat_idx[j]])
-        if use_hex:
-            d2 = _laplacian_hex(conc[sat], nhood)
-        else:
-            d2 = _laplacian_rect(conc[sat], nhood)
+        # discrete Laplacian at every saturated node: 7-point stencil (hex) or 5-point (rect)
+        for j in prange(n_sat):
+            for g in range(n_genes):
+                if active[g]:
+                    nbrs = 0.0
+                    for m in range(n_nbrs):
+                        nbrs += conc[sat_idx[j, m], g]
+                    c = conc[sat[j], g]
+                    work[j, g] = (2.0 * nbrs - 12.0 * c) / 3.0 if use_hex else nbrs - 4.0 * c
+        for j in prange(n_sat):
+            for g in range(n_genes):
+                if active[g]:
+                    conc[sat[j], g] += work[j, g] * dt
+        # unsaturated (border) nodes follow their nearest saturated node
+        for u in prange(unsat.shape[0]):
+            for g in range(n_genes):
+                if active[g]:
+                    conc[unsat[u], g] += work[unsat_idx[u], g] * dt
+        for k in prange(n_spots):
+            for g in range(n_genes):
+                if active[g] and conc[k, g] < 0:
+                    conc[k, g] = 0.0
 
-        dcdt[:] = 0.0
-        dcdt[sat] = d2
-        conc[sat] += dcdt[sat] * dt
-        conc[unsat] += dcdt[unsat_idx] * dt
-        # set values below zero to 0
-        conc[conc < 0] = 0
-        # compute entropy
-        ent = _entropy(conc[sat]) / sat_shape
-        entropy_arr[i] = np.abs(ent - prev_ent)  # estimate entropy difference
-        prev_ent = ent
-        if entropy_arr[i] <= thresh:
+        # Shannon entropy (nats) of the saturated nodes' normalized concentrations; p = 0 adds 0.
+        # total mass per gene: chunk partials in parallel, then added in chunk order
+        for b in prange(n_chunks):
+            for g in range(n_genes):
+                partial[b, g] = 0.0
+            for j in range(b * chunk, min(n_sat, (b + 1) * chunk)):
+                for g in range(n_genes):
+                    x = conc[sat[j], g]
+                    if active[g] and x > 0:
+                        partial[b, g] += x
+        for g in range(n_genes):
+            xs[g] = 0.0
+            for b in range(n_chunks):
+                xs[g] += partial[b, g]
+        # -sum p log p, the same way
+        for b in prange(n_chunks):
+            for g in range(n_genes):
+                partial[b, g] = 0.0
+            for j in range(b * chunk, min(n_sat, (b + 1) * chunk)):
+                for g in range(n_genes):
+                    x = conc[sat[j], g]
+                    if active[g] and x > 0 and xs[g] >= eps:
+                        xn = x / xs[g]
+                        partial[b, g] -= np.log(max(xn, eps)) * xn
+        for g in prange(n_genes):
+            if active[g]:
+                ent = 0.0
+                for b in range(n_chunks):
+                    ent += partial[b, g]
+                ent /= n_sat
+                if np.abs(ent - prev_ent[g]) <= thresh:
+                    settled[g] = i
+                    active[g] = False
+                prev_ent[g] = ent
+        if not active.any():
             break
 
-    tmp = np.nonzero(entropy_arr <= thresh)[0]
-    return float(tmp[0] if len(tmp) else np.nan)
+    return settled
 
 
-# taken from https://github.com/almaan/sepal/blob/master/sepal/models.py
-@njit(parallel=False, fastmath=True)
-def _laplacian_rect(
-    centers: NDArrayA,
-    nbrs: NDArrayA,
-) -> NDArrayA:
-    """
-    Five point stencil approximation on rectilinear grid.
-
-    See `Wikipedia <https://en.wikipedia.org/wiki/Five-point_stencil>`_ for more information.
-    """
-    d2f: NDArrayA = nbrs - 4 * centers
-    return d2f
+# the same kernel without threads: numba's parallel kernels must not be entered from several threads at once
+_diffusion_serial = njit(fastmath=True, nogil=True)(_diffusion.py_func)
 
 
-# taken from https://github.com/almaan/sepal/blob/master/sepal/models.py
-@njit(fastmath=True)
-def _laplacian_hex(
-    centers: NDArrayA,
-    nbrs: NDArrayA,
-) -> NDArrayA:
-    """
-    Seven point stencil approximation on hexagonal grid.
-
-    References
-    ----------
-    Approximate Methods of Higher Analysis,
-    Curtis D. Benster, L.V. Kantorovich, V.I. Krylov,
-    ISBN-13: 978-0486821603.
-    """
-    d2f: NDArrayA = (2.0 * nbrs - 12.0 * centers) / 3.0
-    return d2f
-
-
-# taken from https://github.com/almaan/sepal/blob/master/sepal/models.py
-@njit(fastmath=True)
-def _entropy(
-    xx: NDArrayA,
-) -> float:
-    """Compute Shannon entropy of an array of probability values (in nats)."""
-    xnz = xx[xx > 0]
-    xs: np.float64 = np.sum(xnz)
-    eps = np.finfo(np.float64).eps  # ~2.22e-16
-    if xs < eps:
-        # 0 because
-        # xn represents probabilities
-        # and p(x)=0 is taken as 0 entropy
-        # see https://stats.stackexchange.com/a/433096
-        return 0.0
-    xn = xnz / xs
-    xl = np.log(np.maximum(xn, eps))
-    return float((-xl * xn).sum())
-
-
-def _compute_idxs(
-    g: spmatrix, spatial: NDArrayA, sat_thresh: int, metric: str = "l1"
-) -> tuple[NDArrayA, NDArrayA, NDArrayA, NDArrayA]:
-    """Get saturated and unsaturated nodes and neighborhood indices."""
+def _compute_idxs(g: spmatrix, spatial: NDArrayA, sat_thresh: int) -> tuple[NDArrayA, NDArrayA, NDArrayA, NDArrayA]:
+    """Saturated and unsaturated spots, the saturated spots' neighbors, and for every unsaturated spot
+    the position in ``sat`` of the saturated spot it follows (a neighbor, else the closest in L1)."""
     sat, unsat = _get_sat_unsat_idx(g.indptr, g.shape[0], sat_thresh)
 
     sat_idx, nearest_sat, un_unsat = _get_nhood_idx(sat, unsat, g.indptr, g.indices, sat_thresh)
+    nearest_sat[np.isnan(nearest_sat)] = sat[_closest(spatial[un_unsat], spatial[sat])]
 
-    # compute dist btwn remaining unsat and all sat
-    dist = pairwise_distances(spatial[un_unsat], spatial[sat], metric=metric)
-    # assign closest sat to remaining nearest_sat
-    nearest_sat[np.isnan(nearest_sat)] = sat[np.argmin(dist, axis=1)]
+    return sat, sat_idx, unsat, np.searchsorted(sat, nearest_sat.astype(np.int64)).astype(np.int32)
 
-    return sat, sat_idx, unsat, nearest_sat.astype(np.int32)
+
+def _closest(queries: NDArrayA, points: NDArrayA) -> NDArrayA:
+    """Index of the L1-closest point for every query, the lowest index among equally close ones.
+
+    A KD-tree instead of a dense ``(queries, points)`` distance matrix, which on a Visium HD grid does
+    not fit in memory.
+    """
+    tree = cKDTree(points)
+    dist, _ = tree.query(queries, k=1, p=1)
+    return np.array([min(hits) for hits in tree.query_ball_point(queries, r=dist, p=1)], dtype=np.intp)
 
 
 @njit
@@ -362,13 +402,15 @@ def _get_nhood_idx(
         i = sat[idx]
         sat_idx[idx] = g_indices[g_indptr[i] : g_indptr[i + 1]]
 
-    # get closest saturated of unsaturated
+    # get closest saturated of unsaturated: a lookup table, not a scan of `sat` per neighbor
+    is_sat = np.zeros(g_indptr.shape[0] - 1, dtype=np.bool_)
+    is_sat[sat] = True
     nearest_sat = np.full_like(unsat, fill_value=np.nan, dtype=np.float64)
     for idx in range(unsat.shape[0]):
         i = unsat[idx]
         unsat_neigh = g_indices[g_indptr[i] : g_indptr[i + 1]]
         for u in unsat_neigh:
-            if u in sat:  # take the first saturated nhood
+            if is_sat[u]:  # take the first saturated nhood
                 nearest_sat[idx] = u
                 break
 
