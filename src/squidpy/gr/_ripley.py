@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from anndata import AnnData
 from scanpy import logging as logg
-from scipy.spatial import ConvexHull, Delaunay
+from scipy.spatial import ConvexHull, Delaunay, cKDTree
 from sklearn.neighbors import KDTree, NearestNeighbors
 from sklearn.preprocessing import LabelEncoder
 from spatialdata import SpatialData
@@ -16,9 +16,15 @@ from spatialdata import SpatialData
 from squidpy._compat import old_positionals
 from squidpy._constants._pkg_constants import Key
 from squidpy._docs import d
-from squidpy._utils import NDArrayA, RNGLike, SeedLike, deprecated_randomness_param
+from squidpy._utils import NDArrayA, RNGLike, SeedLike, deprecated_randomness_param, get_n_numba_threads, thread_map
 from squidpy._validators import normalize_choice
-from squidpy.gr._utils import _assert_categorical_obs, _assert_spatial_basis, _save_data, extract_adata_if_sdata
+from squidpy.gr._utils import (
+    _assert_categorical_obs,
+    _assert_spatial_basis,
+    _count_pairs,
+    _save_data,
+    extract_adata_if_sdata,
+)
 
 __all__ = ["ripley"]
 
@@ -51,6 +57,7 @@ def ripley(
     max_dist: float | None = None,
     n_steps: int = 50,
     rng: SeedLike | RNGLike | None = None,
+    n_jobs: int | None = None,
     copy: bool = False,
     table_key: str | None = None,
 ) -> dict[str, pd.DataFrame | NDArrayA]:
@@ -113,6 +120,8 @@ def ripley(
     n_steps
         Number of steps for the support.
     %(rng)s
+    %(n_jobs_threads)s
+        Only metrics scipy's KD-tree supports run in threads; others run serially.
     %(copy)s
 
     Returns
@@ -151,37 +160,42 @@ def ripley(
     )
     obs_rng, *sim_rngs = np.random.default_rng(rng).spawn(n_simulations + 1)
 
-    for i in np.arange(np.max(cluster_idx) + 1):
-        coord_c = coordinates[cluster_idx == i, :]
-        if mode == "F":
-            random = _ppp(hull, n_simulations=1, n_observations=n_observations, rng=obs_rng)
-            tree_c = NearestNeighbors(metric=metric, n_neighbors=n_neigh).fit(coord_c)
-            distances, _ = tree_c.kneighbors(random, n_neighbors=n_neigh)
-            bins, obs_stats = _f_g_function(distances.squeeze(), support)
-        elif mode == "G":
-            tree_c = NearestNeighbors(metric=metric, n_neighbors=n_neigh).fit(coord_c)
-            distances, _ = tree_c.kneighbors(coordinates[cluster_idx != i, :], n_neighbors=n_neigh)
-            bins, obs_stats = _f_g_function(distances.squeeze(), support)
-        else:
-            bins, obs_stats = _l_function(coord_c, support, N, area, metric)
-        obs_arr[i] = obs_stats
+    n_clusters = len(le.classes_)
+    coords_c = [coordinates[cluster_idx == i, :] for i in range(n_clusters)]
+    if mode != "L":  # scipy's kNN returns infinite distances for missing neighbours instead of raising
+        sizes = np.array([len(c) for c in coords_c])
+        if (small := np.flatnonzero(sizes < n_neigh)).size:
+            raise ValueError(
+                f"Ripley's {mode} needs at least `n_neigh={n_neigh}` observations per cluster, but "
+                + ", ".join(f"`{le.classes_[i]}` has {sizes[i]}" for i in small)
+                + ". Remove these clusters or lower `n_neigh`."
+            )
+    if mode == "F":
+        randoms = _ppp(hull, n_simulations=n_clusters, n_observations=n_observations, rng=obs_rng)
+        random = randoms[-1]  # the simulations query the last cluster's random points
 
-    sims = np.empty((n_simulations, len(bins)))
-    pvalues = np.ones((le.classes_.shape[0], len(bins)))
+    def observed(i: int) -> NDArrayA:
+        queries = randoms[i] if mode == "F" else coordinates[cluster_idx != i, :]
+        return _f_g_function(_knn_distances(coords_c[i], queries, n_neigh, metric), support)
 
-    for i in range(n_simulations):
-        random_i = _ppp(hull, n_simulations=1, n_observations=n_observations, rng=sim_rngs[i])
-        if mode == "F":
-            tree_i = NearestNeighbors(metric=metric, n_neighbors=n_neigh).fit(random_i)
-            distances_i, _ = tree_i.kneighbors(random, n_neighbors=1)
-            _, stats_i = _f_g_function(distances_i.squeeze(), support)
-        elif mode == "G":
-            tree_i = NearestNeighbors(metric=metric, n_neighbors=n_neigh).fit(random_i)
-            distances_i, _ = tree_i.kneighbors(coordinates, n_neighbors=1)
-            _, stats_i = _f_g_function(distances_i.squeeze(), support)
-        else:
-            _, stats_i = _l_function(random_i, support, N, area, metric)
+    # threads only through scipy, which releases the GIL; sklearn's trees are run serially
+    n_jobs = get_n_numba_threads(n_jobs) if metric in _SCIPY_P else 1
+    if mode == "L":
+        obs_arr[:] = _l_estimate(_pair_counts(coords_c, support, metric, n_jobs), N, area)
+    else:
+        obs_arr[:] = thread_map(observed, range(n_clusters), n_jobs=n_jobs)
 
+    sims = np.empty((n_simulations, n_steps))
+    pvalues = np.ones((n_clusters, n_steps))
+
+    def simulated(i: int) -> NDArrayA:
+        random_i = _ppp(hull, n_simulations=1, n_observations=n_observations, rng=sim_rngs[i])[0]
+        if mode == "L":
+            return _l_estimate(_pair_counts([random_i], support, metric, n_jobs=1), N, area)[0]
+        return _f_g_function(_knn_distances(random_i, random if mode == "F" else coordinates, 1, metric), support)
+
+    # every simulation has its own generator, so they run in any order and give the same draws
+    for i, stats_i in enumerate(thread_map(simulated, range(n_simulations), n_jobs=n_jobs)):
         for j in range(obs_arr.shape[0]):
             pvalues[j] += stats_i >= obs_arr[j]
         sims[i] = stats_i
@@ -189,10 +203,10 @@ def ripley(
     pvalues /= n_simulations + 1
     pvalues = np.minimum(pvalues, 1 - pvalues)
 
-    obs_df = _reshape_res(obs_arr.T, columns=le.classes_, index=bins, var_name=cluster_key)
-    sims_df = _reshape_res(sims.T, columns=np.arange(n_simulations), index=bins, var_name="simulations")
+    obs_df = _reshape_res(obs_arr.T, columns=le.classes_, index=support, var_name=cluster_key)
+    sims_df = _reshape_res(sims.T, columns=np.arange(n_simulations), index=support, var_name="simulations")
 
-    res = {f"{mode}_stat": obs_df, "sims_stat": sims_df, "bins": bins, "pvalues": pvalues}
+    res = {f"{mode}_stat": obs_df, "sims_stat": sims_df, "bins": support, "pvalues": pvalues}
 
     if copy:
         logg.info("Finish", time=start)
@@ -210,28 +224,57 @@ def _reshape_res(results: NDArrayA, columns: NDArrayA | list[str], index: NDArra
     return df
 
 
-def _f_g_function(distances: NDArrayA, support: NDArrayA) -> tuple[NDArrayA, NDArrayA]:
-    counts, bins = np.histogram(distances, bins=support)
+def _f_g_function(distances: NDArrayA, support: NDArrayA) -> NDArrayA:
+    counts, _ = np.histogram(distances, bins=support)
     fracs = np.cumsum(counts) / counts.sum()
-    return bins, np.concatenate((np.zeros((1,), dtype=float), fracs))
+    return np.concatenate((np.zeros((1,), dtype=float), fracs))
 
 
-def _l_function(points: NDArrayA, support: NDArrayA, n: int, area: float, metric: str) -> tuple[NDArrayA, NDArrayA]:
+# Minkowski p of the metrics scipy's cKDTree supports; the rest go through sklearn's KDTree
+_SCIPY_P = {
+    "euclidean": 2.0,
+    "l2": 2.0,
+    "manhattan": 1.0,
+    "cityblock": 1.0,
+    "l1": 1.0,
+    "minkowski": 2.0,
+    "chebyshev": np.inf,
+    "infinity": np.inf,
+}
+
+
+def _knn_distances(points: NDArrayA, queries: NDArrayA, k: int, metric: str) -> NDArrayA:
+    """Distances from every query to its ``k`` nearest ``points``.
+
+    scipy's :class:`~scipy.spatial.cKDTree` for the metrics it covers: it releases the GIL and is safe
+    to call from many threads. sklearn's ``NearestNeighbors`` otherwise, which changes threadpool
+    limits globally and so must not run in concurrent threads.
+    """
+    if metric in _SCIPY_P:
+        return cKDTree(points).query(queries, k=k, p=_SCIPY_P[metric])[0]
+    return NearestNeighbors(metric=metric, n_neighbors=k).fit(points).kneighbors(queries, n_neighbors=k)[0]
+
+
+def _pair_counts(coords: list[NDArrayA], support: NDArrayA, metric: str, n_jobs: int) -> NDArrayA:
+    """Ordered pairs ``i != j`` within each ``support`` distance, for every point set in ``coords``.
+
+    Ripley's K(d) counts exactly these. scipy's dual-tree :meth:`~scipy.spatial.cKDTree.count_neighbors`
+    computes them in threads (see :func:`~squidpy.gr._utils._count_pairs`). sklearn's
+    ``two_point_correlation`` holds the GIL; it remains the path for metrics scipy does not cover.
+    """
     if metric not in KDTree.valid_metrics:
         raise ValueError(f"Unsupported metric '{metric}'. Ripley's L supports {KDTree.valid_metrics}")
-    # Ripley's K(d) is the number of ordered point pairs within distance d. `two_point_correlation`
-    # computes exactly that (cumulatively over `support`, in a single tree pass) without
-    # materializing the O(m^2) pairwise distances.
-    tree = KDTree(points, metric=metric)
-    # `two_point_correlation` counts ordered pairs incl. the `m` self-matches at distance 0;
-    # subtracting `m` gives ordered non-self pairs.
-    # `dualtree=True` has been observed to be roughly 2x faster than the single-tree default.
-    num_points = points.shape[0]
-    n_ordered_pairs_less_than_d = tree.two_point_correlation(points, support, dualtree=True) - num_points
+    if metric not in _SCIPY_P:
+        counts = [KDTree(pts, metric=metric).two_point_correlation(pts, support, dualtree=True) for pts in coords]
+        return np.array(counts) - np.array([len(pts) for pts in coords])[:, None]  # drop the self-pairs at d = 0
+    return _count_pairs(coords, [(c, c) for c in range(len(coords))], support, p=_SCIPY_P[metric], n_jobs=n_jobs)
+
+
+def _l_estimate(pair_counts: NDArrayA, n: int, area: float) -> NDArrayA:
+    """Ripley's L from ordered-pair counts: K(d) = pairs / (n * intensity), L = sqrt(K / pi)."""
     intensity = n / area
-    k_estimate = (n_ordered_pairs_less_than_d / n) / intensity
-    l_estimate = np.sqrt(k_estimate / np.pi)
-    return support, l_estimate
+    k_estimate = (pair_counts / n) / intensity
+    return np.sqrt(k_estimate / np.pi)
 
 
 def _ppp(
@@ -260,19 +303,17 @@ def _ppp(
     """
     vxs = hull.points[hull.vertices]
     deln = Delaunay(vxs)
+    lo, hi = vxs.min(0), vxs.max(0)
 
-    bbox = np.array([*vxs.min(0), *vxs.max(0)])
-    result = np.empty((n_simulations, n_observations, 2))
-
-    for i_sim in range(n_simulations):
-        i_obs = 0
-        while i_obs < n_observations:
-            x, y = (
-                rng.uniform(bbox[0], bbox[2]),
-                rng.uniform(bbox[1], bbox[3]),
-            )
-            if deln.find_simplex((x, y)) >= 0:
-                result[i_sim, i_obs] = (x, y)
-                i_obs += 1
-
-    return result.squeeze()
+    # Rejection sampling in batches, one `find_simplex` call each. `uniform` with interleaved x/y
+    # bounds draws the same values in the same order as one scalar call per coordinate, so the
+    # accepted points are those of a point-by-point loop over the same generator.
+    accept = hull.volume / np.prod(hi - lo)
+    n = n_simulations * n_observations
+    batches, n_hits = [], 0
+    while n_hits < n:
+        m = int((n - n_hits) / accept * 1.2) + 64
+        xy = rng.uniform(np.tile(lo, m), np.tile(hi, m)).reshape(m, 2)
+        batches.append(xy[deln.find_simplex(xy) >= 0])
+        n_hits += len(batches[-1])
+    return np.concatenate(batches)[:n].reshape(n_simulations, n_observations, 2)
