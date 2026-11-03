@@ -12,7 +12,7 @@ import scanpy as sc
 from anndata import AnnData
 from pandas.testing import assert_frame_equal
 from scanpy import settings as s
-from scipy.sparse import csc_matrix
+from scipy.sparse import csc_matrix, csr_matrix, issparse
 
 from squidpy._constants._pkg_constants import Key
 from squidpy.gr import ligrec
@@ -108,7 +108,7 @@ class TestValidBehavior:
         genes = pd.Series([g for gs in pt.interactions[["source", "target"]].values for g in gs], dtype="string")
 
         np.testing.assert_array_equal(genes.values, genes.str.upper().values)
-        np.testing.assert_array_equal(pt._data.columns, pt._data.columns.str.upper())
+        np.testing.assert_array_equal(pt._gene_pos.index, pt._gene_pos.index.str.upper())
 
     def test_complex_policy_min(self, adata: AnnData, complexes: Complexes_t):
         g = adata.raw.var_names
@@ -344,6 +344,36 @@ class TestValidBehavior:
         pt = PermutationTest(adata).prepare(interactions=interactions)
         with pytest.warns(FutureWarning, match=rf"Parameter `{param}` of `test\(\)` is deprecated"):
             pt.test(_CK, **{param: True}, **kw)
+
+    @pytest.mark.parametrize("sparse", [False, True])
+    def test_nan_is_no_expression_and_input_untouched(self, adata: AnnData, interactions: Interactions_t, sparse: bool):
+        """NaN counts as 0, dense and sparse `X` agree, and the user's matrix is never written to."""
+        kw = {"cluster_key": _CK, "interactions": interactions, "n_perms": 25, "copy": True, "rng": 0, "use_raw": False}
+        x = adata.X.toarray() if issparse(adata.X) else np.asarray(adata.X, dtype=np.float64)
+        x[x < np.quantile(x, 0.3)] = 0.0
+        zeros = adata.copy()
+        zeros.X = x
+        nans = adata.copy()
+        nans.X = np.where(x == 0, np.nan, x)
+        if sparse:
+            nans.X = csr_matrix(nans.X)  # stores the NaNs explicitly
+        before = nans.X.copy()
+        a, b = ligrec(zeros, **kw), ligrec(nans, **kw)
+        for key in ("means", "pvalues"):
+            pd.testing.assert_frame_equal(a[key], b[key])
+        np.testing.assert_array_equal(nans.X.toarray() if sparse else nans.X, before.toarray() if sparse else before)
+
+    def test_missing_cluster_cells_are_dropped(self, adata: AnnData, interactions: Interactions_t):
+        """Cells without a cluster take no part, exactly as if they were not in the data."""
+        kw = {"cluster_key": _CK, "interactions": interactions, "n_perms": 25, "copy": True, "rng": 0}
+        missing = adata.copy()
+        missing.obs[_CK] = missing.obs[_CK].astype(object)
+        missing.obs.iloc[:20, missing.obs.columns.get_loc(_CK)] = np.nan
+        missing.obs[_CK] = missing.obs[_CK].astype("category")
+        subset = missing[20:].copy()
+        a, b = ligrec(missing, **kw), ligrec(subset, **kw)
+        for key in ("means", "pvalues"):
+            pd.testing.assert_frame_equal(a[key], b[key])
 
     def test_paul15_correct_means(self, paul15: AnnData, paul15_means: pd.DataFrame):
         res = ligrec(
