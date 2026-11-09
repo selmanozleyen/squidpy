@@ -243,6 +243,8 @@ This means that local testing via hatch and remote testing on CI tests against t
 
 ## Publishing a release
 
+Run `hatch run towncrier:build X.Y.Z` to generate a PR that creates a new release notes file. Wait for the PR to be auto-merged.
+
 ### Updating the version number
 
 Before making a release, you need to update the version number in the `pyproject.toml` file.
@@ -268,6 +270,10 @@ This will automatically create a git tag and trigger a Github workflow that crea
 ## Writing documentation
 
 Please write documentation for new or changed features and use-cases.
+
+For any user-visible changes, please make sure a note has been added to the release notes using `hatch run towncrier:create` (see towncrier’s {doc}`towncrier:tutorial`).
+When asked for “Issue number (`+` if none)”, enter the _PR number_ instead.
+
 This project uses [sphinx][] with the following features:
 
 - The [myst][] extension allows to write documentation in markdown/Markedly Structured Text

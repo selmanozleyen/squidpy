@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from functools import cache
+from functools import cache, partial
 from importlib.metadata import metadata
 
+from docutils import nodes
 from scverse_doc.config import DEFAULTS
 from scverse_doc.registry import intersphinx
 from sphinx.application import Sphinx
@@ -26,6 +27,7 @@ extensions = [
     "sphinx_tabs.tabs",
     "nbsphinx",
     "scverse_misc.sphinx_ext",
+    "sphinx_issues",
     "IPython.sphinxext.ipython_console_highlighting",
 ]
 intersphinx_mapping = intersphinx() | dict(  # noqa: C408
@@ -42,6 +44,7 @@ intersphinx_mapping = intersphinx() | dict(  # noqa: C408
     omnipath=("https://omnipath.readthedocs.io/en/latest", None),
     napari=("https://napari.org", None),
     shapely=("https://shapely.readthedocs.io/en/stable", None),
+    towncrier=("https://towncrier.readthedocs.io/en/stable/", None),
 )
 
 # Add any paths that contain templates here, relative to this directory.
@@ -57,7 +60,8 @@ exclude_patterns = [
     *DEFAULTS.exclude_patterns,
     "notebooks/README.rst",
     "notebooks/CONTRIBUTING.rst",
-    "release/changelog/*",
+    # exclude all 0.x.y.md files, but not index.md
+    "release-notes/[!i]*.md",
     "build",
 ]
 suppress_warnings = ["download.not_readable", "git.too_shallow"]
@@ -147,6 +151,9 @@ html_theme_options = {
 }
 html_show_sphinx = False
 
+# link config
+issues_github_path = "scverse/squidpy"
+
 
 # Each params key carries its default in the `Annotated` metadata of its
 # declaration (`squidpy._params.Default`). Read it from there: one source of truth,
@@ -195,3 +202,5 @@ def setup(app: Sphinx) -> None:
     app.connect("autodoc-process-docstring", _append_default)
     app.add_css_file("css/custom.css")
     app.add_css_file("css/dataframe.css")  # had to add this manually
+    app.add_generic_role("small", partial(nodes.inline, classes=["small"]))
+    app.add_generic_role("smaller", partial(nodes.inline, classes=["smaller"]))
