@@ -52,7 +52,7 @@ def test_sparse_matches_dense(fmt):
 
 
 def test_recovers_unmeasured_genes():
-    # guards against a bug shared by the implementation and `_spage_reference`
+    # an end-to-end sanity check that needs no download
     ref, query, truth = _data()
 
     res = _impute(ref, query, n_neighbors=20)

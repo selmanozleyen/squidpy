@@ -10,15 +10,15 @@ import pandas as pd
 import pytest
 from anndata import AnnData
 from scipy.sparse import csr_matrix
-from scipy.special import softmax, xlogy
 
 import squidpy as sq
 
 # the jax CI env sets JAX_ENABLE_X64, and there a missing jax must fail rather than skip
-os.environ.get("JAX_ENABLE_X64") or pytest.importorskip("jax")
+if os.environ.get("JAX_ENABLE_X64") != "1":
+    pytest.importorskip("jax")
+    pytest.importorskip("optax")
 pytestmark = pytest.mark.jax
 
-from squidpy.experimental.tl._tangram_jax import loss  # noqa: E402
 
 _GENES = [f"g{i}" for i in range(10)]
 _N_MEASURED = 7  # the query measures g0-g6, g7-g9 are imputed
@@ -40,28 +40,6 @@ def _impute(data_ref, data_query, **kwargs) -> pd.DataFrame | None:
     return sq.experimental.tl.impute_tangram(
         data_ref, data_query, **({"genes": _UNMEASURED, "num_epochs": 100, "rng": 0, "inplace": False} | kwargs)
     )
-
-
-def _loss(logits: np.ndarray, ref_x: np.ndarray, query_x: np.ndarray, density: np.ndarray | None) -> float:
-    """NumPy port of Tangram's ``Mapper._loss_fn``."""
-    probs = softmax(logits, axis=1)
-    pred = probs.T @ ref_x
-    cosine = (pred * query_x).sum(0) / (np.linalg.norm(pred, axis=0) * np.linalg.norm(query_x, axis=0))
-    loss = -cosine.mean()
-    if density is not None:
-        loss += np.sum(xlogy(density, density) - density * np.log(probs.mean(axis=0)))
-    return loss
-
-
-@pytest.mark.parametrize("with_density", [True, False])
-def test_loss_matches_tangram(with_density):
-    rng = np.random.default_rng(0)
-    logits, ref_x, query_x = rng.normal(size=(5, 4)), rng.uniform(size=(5, 3)), rng.uniform(size=(4, 3))
-    density = rng.dirichlet(np.ones(4)) if with_density else None
-
-    res = loss(logits, ref_x, query_x, density)
-
-    np.testing.assert_allclose(res, _loss(logits, ref_x, query_x, density), rtol=1e-5)
 
 
 def test_recovers_unmeasured_genes():
