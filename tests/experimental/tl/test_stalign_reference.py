@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import importlib
 import os
-from typing import NamedTuple
 
 import numpy as np
 import pytest
@@ -40,36 +39,17 @@ from squidpy.experimental.tl import (  # noqa: E402
 from squidpy.experimental.tl._align._stalign import fit_stalign_image, fit_stalign_volume  # noqa: E402
 from squidpy.experimental.tl._align._stalign_impl import _core, _helpers  # noqa: E402
 
+from .._reference import Bundle, read_bundle  # noqa: E402
+
 _BUNDLE_URL = (
     "https://github.com/theislab/squidpy-ports/releases/download/stalign-reference-v3/stalign_reference.zarr.zip"
 )
 _BUNDLE_SHA256 = "e5add8445590c9da2b5e42631f25b10f7838fb2b694b8438c7d762f49a899702"
 
 
-class Bundle(NamedTuple):
-    arrays: dict[str, dict[str, np.ndarray]]
-    provenance: dict[str, dict]
-    fixtures: dict
-
-
 @pytest.fixture(scope="session")
 def bundle() -> Bundle:
-    """The reference bundle, downloaded once and read into memory."""
-    import anndata as ad
-    import pooch
-    from scanpy import settings
-    from zarr.storage import ZipStore
-
-    path = pooch.retrieve(
-        _BUNDLE_URL, known_hash=f"sha256:{_BUNDLE_SHA256}", path=settings.datasetdir, progressbar=False
-    )
-    with ZipStore(path, mode="r") as store:
-        uns = dict(ad.read_zarr(store).uns)
-    fixtures = uns.pop("fixtures")
-    arrays = {
-        name: {key: value for key, value in section.items() if key != "provenance"} for name, section in uns.items()
-    }
-    return Bundle(arrays, {name: section["provenance"] for name, section in uns.items()}, fixtures)
+    return read_bundle(_BUNDLE_URL, _BUNDLE_SHA256)
 
 
 @pytest.fixture(scope="session")
@@ -102,7 +82,7 @@ def rel(actual, expected) -> float:
 
 @pytest.fixture(scope="session")
 def primitives(bundle):
-    return bundle.arrays["primitives"]
+    return bundle.sections["primitives"]
 
 
 @pytest.fixture(scope="session")
@@ -147,8 +127,9 @@ def _transform_rc(result: StalignObsFit, points_rc, *, inverse: bool = False) ->
 
 def test_every_section_carries_provenance(bundle):
     """Every section records which upstream and which generator run produced it."""
-    assert len(bundle.provenance) == 11
-    for name, payload in bundle.provenance.items():
+    assert len(bundle.sections) == 11
+    for name, section in bundle.sections.items():
+        payload = section["provenance"]
         assert payload["upstream_sha"] == "b2068edc98974efa54537eca194736e177bbe11d", name
         for key in ("ports_commit", "torch", "numpy", "python", "platform", "generated_utc"):
             assert payload[key], f"{name}: empty provenance field {key!r}"
@@ -271,7 +252,7 @@ def test_energy_matches_upstream(
     primitives, source_grid, target_grid, velocity_grid, nt, with_points, warm, bundle, params
 ):
     """``_lddmm_loss`` vs upstream's ``E`` at iteration 0 -- the two optimise the same function."""
-    energy = bundle.arrays["energy"]
+    energy = bundle.sections["energy"]
     _, kwargs, velocity = _loss_arguments(
         primitives, source_grid, target_grid, velocity_grid, nt=nt, with_points=with_points, params=params
     )
@@ -287,7 +268,7 @@ def test_energy_matches_upstream(
 
 def test_energy_budget_is_not_vacuous(primitives, source_grid, target_grid, velocity_grid, bundle, params):
     """A tolerance that a perturbed run also passes is decoration, not a test."""
-    energy = bundle.arrays["energy"]
+    energy = bundle.sections["energy"]
     _, kwargs, velocity = _loss_arguments(
         primitives, source_grid, target_grid, velocity_grid, nt=3, with_points=True, params=params
     )
@@ -299,7 +280,7 @@ def test_energy_budget_is_not_vacuous(primitives, source_grid, target_grid, velo
 @pytest.fixture(scope="session", params=[False, True], ids=["v_zero", "v_nonzero"])
 def measured_gradients(request, primitives, source_grid, target_grid, velocity_grid, bundle, params):
     """Gradients of ``_lddmm_loss``, at ``v = 0`` and at a non-zero velocity."""
-    gradients = bundle.arrays["gradients"]
+    gradients = bundle.sections["gradients"]
     kernel, kwargs, velocity = _loss_arguments(
         primitives,
         source_grid,
@@ -519,7 +500,7 @@ _TRAJECTORY_BUDGET = {1: 1e-10, 5: 1e-9, 50: 1e-6}
 @pytest.mark.parametrize("niter", [1, 5, 50])
 def test_trajectory_matches_upstream(primitives, niter, bundle, source_grid, target_grid, params):
     """Run the real loop for ``n`` steps and compare every state it carries."""
-    snapshot = bundle.arrays[f"trajectory_n{niter}"]
+    snapshot = bundle.sections[f"trajectory_n{niter}"]
     result = _run_lddmm(primitives, source_grid, target_grid, snapshot, niter, params=params)
 
     budget = _TRAJECTORY_BUDGET[niter]
@@ -563,7 +544,7 @@ def _affine_xy(linear, translation) -> np.ndarray:
 
 @pytest.fixture(scope="session")
 def image_reference(bundle):
-    return bundle.arrays["image_trajectory"]
+    return bundle.sections["image_trajectory"]
 
 
 def _public_image_fit(fixture, params, *, swap_roles=False):
@@ -595,7 +576,7 @@ def test_public_image_call_is_role_sensitive(image_reference, params):
 @pytest.fixture(scope="session")
 def image_mixed_units(bundle):
     """Source in one unit, target in another."""
-    return bundle.arrays["image_mixed_units"]
+    return bundle.sections["image_mixed_units"]
 
 
 def _fit_mixed_units(fixture, niter, params):
@@ -689,7 +670,7 @@ def test_image_warp_matches_upstream(image_reference, params):
 
 def test_on_grid_sampling_costs_six_orders_of_magnitude(bundle, params):
     """Sampling exactly on grid lines costs agreement, measured rather than asserted."""
-    matched = bundle.arrays["image_trajectory_matched"]
+    matched = bundle.sections["image_trajectory_matched"]
     axes = (jnp.asarray(matched["axis_0"]), jnp.asarray(matched["axis_1"]))
     result = _core.lddmm(
         axes,
@@ -711,7 +692,7 @@ def test_on_grid_sampling_costs_six_orders_of_magnitude(bundle, params):
 
 def test_converged_solution_matches_upstream(primitives, bundle, source_grid, target_grid, params):
     """500 iterations -- "enough to actually converge", per #1243."""
-    snapshot = bundle.arrays["converged_n500"]
+    snapshot = bundle.sections["converged_n500"]
     result = _run_lddmm(primitives, source_grid, target_grid, snapshot, 500, params=params)
 
     energy = rel(result["energies"][result["n_iter"] - 1], snapshot["E_last"])
@@ -738,7 +719,7 @@ def test_converged_solution_matches_upstream(primitives, bundle, source_grid, ta
 
 @pytest.fixture(scope="session")
 def slice_reference(bundle):
-    return bundle.arrays["slice_trajectory"]
+    return bundle.sections["slice_trajectory"]
 
 
 @pytest.fixture(scope="session")
