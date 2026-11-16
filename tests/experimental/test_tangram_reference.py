@@ -23,9 +23,9 @@ from ._reference import Bundle, read_bundle  # noqa: E402
 from .test_impute_tangram import _data  # noqa: E402
 
 _BUNDLE_URL = (
-    "https://github.com/selmanozleyen/squidpy-ports/releases/download/tangram-reference-v1/tangram_reference.zarr.zip"
+    "https://github.com/theislab/squidpy-ports/releases/download/tangram-reference-v1/tangram_reference.zarr.zip"
 )
-_BUNDLE_SHA256 = "580e918a96f87954e43f94d91f95060b35611cc208ac908fc5fdd2846ff69a36"
+_BUNDLE_SHA256 = "3c6ebc596b5affaa3627e2da0873b930de24dcede4291a7f267293b9b30ff155"
 _PRIORS = ["rna_count_based", "uniform", None]
 # ~10x the largest error measured on Linux, with JAX_ENABLE_X64 on and off; float32 trajectories from the
 # same start drift apart, so the tolerance grows with the epochs
@@ -61,9 +61,11 @@ def test_sections_are_covered(bundle):
 def test_fixture_is_ours(bundle):
     ref, query, truth = _data()
 
-    np.testing.assert_array_equal(bundle.inputs["ref"], ref.X)
-    np.testing.assert_array_equal(bundle.inputs["query"], query.X)
-    np.testing.assert_array_equal(bundle.inputs["truth"], truth)
+    # the bundle is built on Linux, and gamma draws go through the platform's libm: elsewhere a few
+    # differ in the last bit
+    np.testing.assert_allclose(ref.X, bundle.inputs["ref"], rtol=1e-14, atol=0)
+    np.testing.assert_allclose(query.X, bundle.inputs["query"], rtol=1e-14, atol=0)
+    np.testing.assert_allclose(truth, bundle.inputs["truth"], rtol=1e-14, atol=0)
 
 
 @pytest.mark.parametrize("prior", _PRIORS[:2])
