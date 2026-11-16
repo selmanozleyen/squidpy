@@ -33,9 +33,6 @@ def resolve_ref_query(
     query = resolve_table(data_query, query_table, side="query")
     if ref is query:
         raise ValueError("The reference and the query are the same table.")
-    for adata, side_layer, side in ((ref, ref_layer, "reference"), (query, query_layer, "query")):
-        if side_layer is not None and side_layer not in adata.layers:
-            raise KeyError(f"`layer={side_layer!r}`: no such layer in the {side}. Available: {sorted(adata.layers)}.")
 
     genes = assert_non_empty_sequence(genes, name="genes")
     if missing := [g for g in genes if g not in ref.var_names]:
