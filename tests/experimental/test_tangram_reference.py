@@ -46,8 +46,9 @@ def test_density_matches_upstream(bundle, prior):
 
 
 @pytest.mark.parametrize("prior", _PRIORS)
-# float32 trajectories from the same start drift apart slowly, so the tolerance grows with the epochs
-@pytest.mark.parametrize(("num_epochs", "atol"), [(1, 1e-6), (10, 1e-5), (100, 1e-4)])
+# Adam's first step is `lr * g / (|g| + eps)`, so float32 rounding moves it wherever `g` is near eps;
+# after that, float32 trajectories from the same start drift apart slowly
+@pytest.mark.parametrize(("num_epochs", "atol"), [(1, 1e-5), (10, 1e-5), (100, 1e-4)])
 def test_mapping_matches_upstream(bundle, prior, num_epochs, atol):
     section = bundle.sections[f"{prior or 'none'}_epochs{num_epochs}"]
     n_measured = len(bundle.fixtures["measured"])
