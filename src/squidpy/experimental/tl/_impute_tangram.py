@@ -15,7 +15,7 @@ from spatialdata import SpatialData
 
 from squidpy._docs import d
 from squidpy._utils import NDArrayA, RNGLike, SeedLike
-from squidpy._validators import assert_positive, normalize_choice, options_of
+from squidpy._validators import assert_isinstance, assert_positive, normalize_choice, options_of
 from squidpy.experimental.tl._utils import resolve_ref_query
 from squidpy.gr._utils import _extract_expression, _save_data
 
@@ -72,16 +72,16 @@ def impute_tangram(
         data_ref, data_query, genes=genes, table_key=table_key, layer=layer
     )
     density_prior = normalize_choice(density_prior, (*options_of(DensityPrior), None), name="density_prior")
-    if not isinstance(num_epochs, Integral):
-        raise TypeError(f"Expected `num_epochs` to be an integer, found `{type(num_epochs).__name__}`.")
+    assert_isinstance(num_epochs, Integral, name="num_epochs")
     assert_positive(num_epochs, name="num_epochs")
     assert_positive(learning_rate, name="learning_rate")
     rng = np.random.default_rng(rng)
     try:
         import jax.numpy as jnp
+
+        from squidpy.experimental.tl._tangram_jax import map_cells
     except ImportError as e:
-        raise ImportError('Tangram imputation requires JAX: `pip install "squidpy[jax]"`.') from e
-    from squidpy.experimental.tl._tangram_jax import map_cells
+        raise ImportError('Tangram imputation requires JAX and optax: `pip install "squidpy[jax]"`.') from e
 
     ref_x = to_dense(_extract_expression(ref, genes=shared, layer=ref_layer)[0]).astype(np.float32)
     query_x = to_dense(_extract_expression(query, genes=shared, layer=query_layer)[0]).astype(np.float32)

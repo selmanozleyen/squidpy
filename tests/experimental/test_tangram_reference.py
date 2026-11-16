@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import importlib
 import os
 
 import numpy as np
 import pytest
 
 # the jax CI env sets JAX_ENABLE_X64, and there a missing jax must fail rather than skip
-jax = importlib.import_module("jax") if os.environ.get("JAX_ENABLE_X64") else pytest.importorskip("jax")
+os.environ.get("JAX_ENABLE_X64") or pytest.importorskip("jax")
 pytestmark = [pytest.mark.jax, pytest.mark.internet]
 
 from squidpy.experimental.tl._impute_tangram import _density  # noqa: E402

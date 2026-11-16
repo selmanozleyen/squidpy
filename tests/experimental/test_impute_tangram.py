@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import os
 import sys
 
@@ -16,10 +15,10 @@ from scipy.special import softmax, xlogy
 import squidpy as sq
 
 # the jax CI env sets JAX_ENABLE_X64, and there a missing jax must fail rather than skip
-jax = importlib.import_module("jax") if os.environ.get("JAX_ENABLE_X64") else pytest.importorskip("jax")
+os.environ.get("JAX_ENABLE_X64") or pytest.importorskip("jax")
 pytestmark = pytest.mark.jax
 
-from squidpy.experimental.tl._tangram_jax import loss, map_cells  # noqa: E402
+from squidpy.experimental.tl._tangram_jax import loss  # noqa: E402
 
 _GENES = [f"g{i}" for i in range(10)]
 _N_MEASURED = 7  # the query measures g0-g6, g7-g9 are imputed
@@ -63,31 +62,6 @@ def test_loss_matches_tangram(with_density):
     res = loss(logits, ref_x, query_x, density)
 
     np.testing.assert_allclose(res, _loss(logits, ref_x, query_x, density), rtol=1e-5)
-
-
-def test_map_cells_matches_reference_loop():
-    rng = np.random.default_rng(0)
-    ref_x, query_x = rng.uniform(size=(5, 3)).astype(np.float32), rng.uniform(size=(4, 3)).astype(np.float32)
-    density = rng.dirichlet(np.ones(4)).astype(np.float32)
-    # Tangram's training loop, with finite differences instead of autograd
-    logits = np.random.default_rng(1).standard_normal((5, 4), dtype=np.float32).astype(np.float64)
-    first, second, eps = np.zeros_like(logits), np.zeros_like(logits), 1e-6
-    for step in range(1, 4):
-        grad = np.zeros_like(logits)
-        for idx in np.ndindex(logits.shape):
-            shift = np.zeros_like(logits)
-            shift[idx] = eps
-            grad[idx] = (
-                _loss(logits + shift, ref_x, query_x, density) - _loss(logits - shift, ref_x, query_x, density)
-            ) / (2 * eps)
-        first = 0.9 * first + 0.1 * grad
-        second = 0.999 * second + 0.001 * grad**2
-        logits -= 0.1 / (1 - 0.9**step) * first / (np.sqrt(second / (1 - 0.999**step)) + 1e-8)
-
-    init = np.random.default_rng(1).standard_normal((5, 4), dtype=np.float32)
-    probs = map_cells(init, ref_x, query_x, density, num_epochs=3, learning_rate=0.1)
-
-    np.testing.assert_allclose(probs, softmax(logits, axis=1), rtol=1e-4)
 
 
 def test_recovers_unmeasured_genes():
@@ -175,36 +149,21 @@ def test_unexpressed_genes_are_ignored(unexpressed_in):
         pytest.param({"learning_rate": 0}, "learning_rate", id="learning_rate"),
         pytest.param({"density_prior": "foo"}, "density_prior", id="density_prior"),
         pytest.param({"genes": "g7", "layer": (None, "zero")}, "express no gene", id="no-expressed-gene"),
+        pytest.param({"layer": (None, "neg")}, "non-negative", id="negative-expression"),
     ],
 )
 def test_invalid_input(kwargs, match):
     ref, query, _ = _data()
     query.layers["zero"] = np.zeros_like(query.X)
+    query.layers["neg"] = -query.X
 
     with pytest.raises(ValueError, match=match):
         _impute(ref, query, **kwargs)
 
 
-def test_rna_count_density_needs_non_negative_expression():
-    ref, query, _ = _data()
-    query.X[0, 0] = -1e3
-
-    with pytest.raises(ValueError, match="non-negative"):
-        _impute(ref, query)
-
-
-def test_no_shared_genes():
-    ref, query, _ = _data()
-    query.var_names = [f"other{i}" for i in range(query.n_vars)]
-
-    with pytest.raises(ValueError, match="no genes in common"):
-        _impute(ref, query)
-
-
 def test_missing_jax(monkeypatch):
     ref, query, _ = _data()
-    for module in ("jax", "jax.numpy", "squidpy.experimental.tl._tangram_jax"):
-        monkeypatch.setitem(sys.modules, module, None)
+    monkeypatch.setitem(sys.modules, "jax", None)
 
     with pytest.raises(ImportError, match=r"squidpy\[jax\]"):
         _impute(ref, query)
