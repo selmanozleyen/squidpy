@@ -16,8 +16,8 @@ from threadpoolctl import threadpool_limits
 
 from squidpy._docs import d
 from squidpy._utils import NDArrayA, get_n_numba_threads
-from squidpy._validators import assert_in_range, assert_non_empty_sequence
-from squidpy.experimental.tl._utils import query_of, resolve_pair, resolve_table
+from squidpy._validators import assert_in_range
+from squidpy.experimental.tl._utils import resolve_ref_query
 from squidpy.gr._utils import _extract_expression, _save_data
 
 __all__ = ["impute_spage"]
@@ -94,30 +94,13 @@ def impute_spage(
 
     Otherwise, stores it in the query's ``obsm[key_added]`` and returns `None`.
     """
-    ref_table, query_table = resolve_pair(table_key, name="table_key")
-    ref_layer, query_layer = resolve_pair(layer, name="layer")
-    data_query = query_of(
-        data_ref, data_query, ref_address=(ref_table,), query_address=(query_table,), key_name="table_key"
+    ref, query, genes, shared, ref_layer, query_layer = resolve_ref_query(
+        data_ref, data_query, genes=genes, table_key=table_key, layer=layer
     )
-    ref = resolve_table(data_ref, ref_table, side="reference")
-    query = resolve_table(data_query, query_table, side="query")
-    if ref is query:
-        raise ValueError("The reference and the query are the same table.")
-
     n_threads = get_n_numba_threads(n_jobs)
     assert_in_range(n_neighbors, 1, ref.n_obs, name="n_neighbors")
     if not 0 <= cosine_threshold < 1:
         raise ValueError(f"Expected `cosine_threshold` to be in interval `[0, 1)`, found `{cosine_threshold}`.")
-    for adata, side_layer, side in ((ref, ref_layer, "reference"), (query, query_layer, "query")):
-        if side_layer is not None and side_layer not in adata.layers:
-            raise KeyError(f"`layer={side_layer!r}`: no such layer in the {side}. Available: {sorted(adata.layers)}.")
-
-    genes = assert_non_empty_sequence(genes, name="genes")
-    if missing := [g for g in genes if g not in ref.var_names]:
-        raise KeyError(f"Genes not found in the reference: {missing}.")
-    shared = query.var_names.intersection(ref.var_names, sort=False).tolist()
-    if not shared:
-        raise ValueError("The reference and the query have no genes in common.")
     assert_in_range(n_pv, 2, min(len(shared), query.n_obs - 1, ref.n_obs - 1), name="n_pv")
 
     start = logg.info(f"Imputing `{len(genes)}` genes with SpaGE using `{n_threads}` thread(s)")
