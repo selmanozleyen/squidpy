@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import importlib
+import os
+import sys
+
 import numpy as np
 import pandas as pd
 import pytest
 from anndata import AnnData
 from scipy.sparse import csr_matrix
-from scipy.special import softmax
+from scipy.special import softmax, xlogy
 
 import squidpy as sq
-from squidpy.experimental.tl._impute_tangram import _adam_step, _gradient, _map_cells, _softmax
+
+# the jax CI env sets JAX_ENABLE_X64, and there a missing jax must fail rather than skip
+jax = importlib.import_module("jax") if os.environ.get("JAX_ENABLE_X64") else pytest.importorskip("jax")
+pytestmark = pytest.mark.jax
+
+from squidpy.experimental.tl._tangram_jax import loss, map_cells  # noqa: E402
 
 _GENES = [f"g{i}" for i in range(10)]
 _N_MEASURED = 7  # the query measures g0-g6, g7-g9 are imputed
@@ -35,61 +44,25 @@ def _impute(data_ref, data_query, **kwargs) -> pd.DataFrame | None:
 
 
 def _loss(logits: np.ndarray, ref_x: np.ndarray, query_x: np.ndarray, density: np.ndarray | None) -> float:
-    """Tangram's loss in the `"cells"` mode, written as in its `Mapper._loss_fn`."""
+    """NumPy port of Tangram's ``Mapper._loss_fn``."""
     probs = softmax(logits, axis=1)
     pred = probs.T @ ref_x
     cosine = (pred * query_x).sum(0) / (np.linalg.norm(pred, axis=0) * np.linalg.norm(query_x, axis=0))
     loss = -cosine.mean()
     if density is not None:
-        loss += np.sum(density * np.log(density / (probs.sum(axis=0) / len(probs))))
+        loss += np.sum(xlogy(density, density) - density * np.log(probs.mean(axis=0)))
     return loss
 
 
 @pytest.mark.parametrize("with_density", [True, False])
-def test_gradient_matches_finite_differences(with_density):
+def test_loss_matches_tangram(with_density):
     rng = np.random.default_rng(0)
     logits, ref_x, query_x = rng.normal(size=(5, 4)), rng.uniform(size=(5, 3)), rng.uniform(size=(4, 3))
     density = rng.dirichlet(np.ones(4)) if with_density else None
-    eps = 1e-6
-    expected = np.zeros_like(logits)
-    for idx in np.ndindex(logits.shape):
-        step = np.zeros_like(logits)
-        step[idx] = eps
-        expected[idx] = (
-            _loss(logits + step, ref_x, query_x, density) - _loss(logits - step, ref_x, query_x, density)
-        ) / (2 * eps)
 
-    grad = _gradient(
-        softmax(logits, axis=1), ref_x, query_x / np.linalg.norm(query_x, axis=0), density, out=np.empty_like(logits)
-    )
+    res = loss(logits, ref_x, query_x, density)
 
-    np.testing.assert_allclose(grad, expected, rtol=1e-5, atol=1e-9)
-
-
-def test_softmax():
-    logits = np.random.default_rng(0).normal(size=(4, 6)).astype(np.float32)
-    logits[0] += 100  # `exp` overflows float32 without the shift by the row maximum
-    out = np.empty_like(logits)
-
-    _softmax(logits, out)
-
-    np.testing.assert_allclose(out, softmax(logits, axis=1), rtol=1e-6)
-
-
-def test_adam_step_matches_torch_adam():
-    rng = np.random.default_rng(0)
-    params, grads = rng.normal(size=(3, 2)), rng.normal(size=(2, 3, 2))
-    expected, first, second = params.copy(), np.zeros_like(params), np.zeros_like(params)
-    for step, grad in enumerate(grads, start=1):  # `torch.optim.Adam.step` with its defaults
-        first = 0.9 * first + 0.1 * grad
-        second = 0.999 * second + 0.001 * grad**2
-        expected -= 0.1 / (1 - 0.9**step) * first / (np.sqrt(second / (1 - 0.999**step)) + 1e-8)
-
-    first, second = np.zeros_like(params), np.zeros_like(params)
-    for step, grad in enumerate(grads, start=1):
-        _adam_step(params, grad, first, second, 0.1, step)
-
-    np.testing.assert_allclose(params, expected, rtol=1e-12)
+    np.testing.assert_allclose(res, _loss(logits, ref_x, query_x, density), rtol=1e-5)
 
 
 def test_map_cells_matches_reference_loop():
@@ -111,7 +84,8 @@ def test_map_cells_matches_reference_loop():
         second = 0.999 * second + 0.001 * grad**2
         logits -= 0.1 / (1 - 0.9**step) * first / (np.sqrt(second / (1 - 0.999**step)) + 1e-8)
 
-    probs = _map_cells(ref_x, query_x, density, num_epochs=3, learning_rate=0.1, rng=np.random.default_rng(1))
+    init = np.random.default_rng(1).standard_normal((5, 4), dtype=np.float32)
+    probs = map_cells(init, ref_x, query_x, density, num_epochs=3, learning_rate=0.1)
 
     np.testing.assert_allclose(probs, softmax(logits, axis=1), rtol=1e-4)
 
@@ -160,6 +134,15 @@ def test_density_prior():
 
     pd.testing.assert_frame_equal(count_based, _impute(ref, query, density_prior="uniform"), rtol=1e-4)
     assert not np.allclose(count_based.to_numpy(), _impute(ref, query, density_prior=None).to_numpy())
+
+
+def test_count_based_density_with_empty_query_cell():
+    ref, query, _ = _data()
+    query.X[0] = 0
+
+    res = _impute(ref, query)
+
+    assert np.isfinite(res.to_numpy()).all()
 
 
 def test_count_based_density_uses_query_layer():
@@ -215,4 +198,13 @@ def test_no_shared_genes():
     query.var_names = [f"other{i}" for i in range(query.n_vars)]
 
     with pytest.raises(ValueError, match="no genes in common"):
+        _impute(ref, query)
+
+
+def test_missing_jax(monkeypatch):
+    ref, query, _ = _data()
+    for module in ("jax", "jax.numpy", "squidpy.experimental.tl._tangram_jax"):
+        monkeypatch.setitem(sys.modules, module, None)
+
+    with pytest.raises(ImportError, match=r"squidpy\[jax\]"):
         _impute(ref, query)

@@ -473,7 +473,31 @@ Otherwise, modifies the ``adata`` with the following keys:
     - :attr:`anndata.AnnData.obsp` ``['{key_added}_distances']`` - the spatial distances.
     - :attr:`anndata.AnnData.uns`  ``['{key_added}']`` - :class:`dict` containing parameters."""
 
+_impute_data = """\
+data_ref, data_query
+    The scRNA-seq reference and the spatial query, each an :class:`~anndata.AnnData` or a
+    :class:`~spatialdata.SpatialData`. Leave ``data_query=None`` with ``data_ref`` a SpatialData
+    holding both samples, distinguished by a ``table_key`` pair. Both should be normalized the same way."""
+_impute_keys = """\
+table_key
+    For SpatialData input, which table holds the data. A single key applies to both sides;
+    a ``(ref, query)`` pair addresses each side separately (use `None` for an AnnData side).
+layer
+    Layer holding the expression, or :attr:`anndata.AnnData.X` if `None`. A single value applies to
+    both sides; a ``(ref, query)`` pair addresses each side separately."""
+_impute_inplace = """\
+inplace
+    If `True`, store the result in the query's ``obsm[key_added]``, otherwise return it."""
+_impute_returns = """\
+If ``inplace = False``, a :class:`pandas.DataFrame` with the query's cells as rows and ``genes`` as columns,
+otherwise `None`."""
+
+
 d = DocstringProcessor(
+    impute_data=_impute_data,
+    impute_keys=_impute_keys,
+    impute_inplace=_impute_inplace,
+    impute_returns=_impute_returns,
     adata=_adata,
     table_key=_table_key,
     img_container=_img_container,

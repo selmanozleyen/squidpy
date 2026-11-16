@@ -56,19 +56,11 @@ def impute_spage(
 
     Parameters
     ----------
-    data_ref, data_query
-        The scRNA-seq reference and the spatial query, each an :class:`~anndata.AnnData` or a
-        :class:`~spatialdata.SpatialData`. Leave ``data_query=None`` with ``data_ref`` a SpatialData
-        holding both samples, distinguished by a ``table_key`` pair. Both should be normalized the same way.
+    %(impute_data)s
     genes
         Genes of the reference to impute. They may also be measured in the query.
         The result is dense, with ``n_obs * len(genes)`` values for the query's ``n_obs``.
-    table_key
-        For SpatialData input, which table holds the data. A single key applies to both sides;
-        a ``(ref, query)`` pair addresses each side separately (use `None` for an AnnData side).
-    layer
-        Layer holding the expression, or :attr:`anndata.AnnData.X` if `None`. A single value applies to
-        both sides; a ``(ref, query)`` pair addresses each side separately.
+    %(impute_keys)s
     n_pv
         Number of principal components computed per dataset, and hence the maximum number of principal vectors.
         Must be at least 2, at most the number of shared genes that vary in both datasets, and smaller than
@@ -84,15 +76,11 @@ def impute_spage(
         ``-1`` leave as configured. If several reference cells have identical shared-gene expression, which of
         them fill a query cell's last neighbor slots may depend on the thread count when the query has at most
         as many cells as the reference.
-    inplace
-        If `True`, store the result in the query, otherwise return it.
+    %(impute_inplace)s
 
     Returns
     -------
-    If ``inplace = False``, returns a :class:`pandas.DataFrame` with the query's cells as rows and ``genes``
-    as columns.
-
-    Otherwise, stores it in the query's ``obsm[key_added]`` and returns `None`.
+    %(impute_returns)s
     """
     ref, query, genes, shared, ref_layer, query_layer = resolve_ref_query(
         data_ref, data_query, genes=genes, table_key=table_key, layer=layer
