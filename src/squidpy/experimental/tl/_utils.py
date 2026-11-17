@@ -7,7 +7,41 @@ from collections.abc import Sequence
 from anndata import AnnData
 from spatialdata import SpatialData
 
-__all__ = ["query_of", "resolve_pair", "resolve_table"]
+from squidpy._validators import assert_non_empty_sequence
+
+__all__ = ["resolve_ref_query"]
+
+
+def resolve_ref_query(
+    data_ref: AnnData | SpatialData,
+    data_query: AnnData | SpatialData | None,
+    *,
+    genes: str | Sequence[str],
+    table_key: str | Sequence[str | None] | None,
+    layer: str | Sequence[str | None] | None,
+) -> tuple[AnnData, AnnData, list[str], list[str], str | None, str | None]:
+    """Resolve the reference and query tables of an imputation, split its layers, and validate ``genes``.
+
+    Return the reference, the query, the genes to impute, the genes they share, and their layers.
+    """
+    ref_table, query_table = resolve_pair(table_key, name="table_key")
+    ref_layer, query_layer = resolve_pair(layer, name="layer")
+    data_query = query_of(
+        data_ref, data_query, ref_address=(ref_table,), query_address=(query_table,), key_name="table_key"
+    )
+    ref = resolve_table(data_ref, ref_table, side="reference")
+    query = resolve_table(data_query, query_table, side="query")
+    for side, adata in (("reference", ref), ("query", query)):
+        if not adata.var_names.is_unique:
+            raise ValueError(f"The {side} has duplicate gene names; make them unique with `var_names_make_unique`.")
+
+    genes = assert_non_empty_sequence(genes, name="genes")
+    if missing := [g for g in genes if g not in ref.var_names]:
+        raise KeyError(f"Genes not found in the reference: {missing}.")
+    shared = query.var_names.intersection(ref.var_names, sort=False).tolist()
+    if not shared:
+        raise ValueError("The reference and the query have no genes in common.")
+    return ref, query, genes, shared, ref_layer, query_layer
 
 
 def resolve_pair(value: str | Sequence[str | None] | None, *, name: str) -> tuple[str | None, str | None]:

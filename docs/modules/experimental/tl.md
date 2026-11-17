@@ -10,4 +10,5 @@
    tl.assign_stitch_groups
    tl.make_stitched_labels
    tl.impute_spage
+   tl.impute_tangram
 ```

@@ -109,6 +109,10 @@ jobs:
             env: { name: hatch-test.py3.14-pre } # pre-release only needs one OS
           - os: ubuntu-latest
             env: { name: hatch-test.py3.14-stable } # skipping because we run this as a coverage job
+          - os: ubuntu-latest
+            env: { name: hatch-test.py3.13-stable-jax } # skipping because we run this in the coverage job
+          - os: macos-latest
+            env: { name: hatch-test.py3.13-stable-jax } # reference tolerances are measured on Linux
     name: ${{ matrix.env.label }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ contains(matrix.env.name, 'pre') }}
@@ -220,6 +224,18 @@ jobs:
         run: |
           uvx hatch run hatch-test.py3.14-stable:cov-erase
           uvx hatch run hatch-test.py3.14-stable:run-cov -v --color=yes
+
+      - name: run jax coverage tests
+        env:
+          PLATFORM: ubuntu-latest
+          DISPLAY: :42
+          UV_PYTHON: "3.13" # setup-uv set 3.14, which uv would otherwise install the 3.13 env's packages for
+        run: uvx hatch run hatch-test.py3.13-stable-jax:run-cov -v --color=yes
+
+      - name: report coverage
+        env:
+          PLATFORM: ubuntu-latest
+        run: |
           uvx hatch run hatch-test.py3.14-stable:cov-combine
           uvx hatch run hatch-test.py3.14-stable:cov-report
 

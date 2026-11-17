@@ -18,8 +18,8 @@ from threadpoolctl import threadpool_limits
 
 from squidpy._docs import d
 from squidpy._utils import NDArrayA, get_n_numba_threads, numba_threads
-from squidpy._validators import assert_in_range, assert_non_empty_sequence
-from squidpy.experimental.tl._utils import query_of, resolve_pair, resolve_table
+from squidpy._validators import assert_in_range
+from squidpy.experimental.tl._utils import resolve_ref_query
 from squidpy.gr._utils import _extract_expression, _save_data
 
 __all__ = ["impute_spage"]
@@ -58,19 +58,11 @@ def impute_spage(
 
     Parameters
     ----------
-    data_ref, data_query
-        The scRNA-seq reference and the spatial query, each an :class:`~anndata.AnnData` or a
-        :class:`~spatialdata.SpatialData`. Leave ``data_query=None`` with ``data_ref`` a SpatialData
-        holding both samples, distinguished by a ``table_key`` pair. Both should be normalized the same way.
+    %(impute_data)s
     genes
         Genes of the reference to impute. They may also be measured in the query.
         The result is dense, with ``n_obs * len(genes)`` values for the query's ``n_obs``.
-    table_key
-        For SpatialData input, which table holds the data. A single key applies to both sides;
-        a ``(ref, query)`` pair addresses each side separately (use `None` for an AnnData side).
-    layer
-        Layer holding the expression, or :attr:`anndata.AnnData.X` if `None`. A single value applies to
-        both sides; a ``(ref, query)`` pair addresses each side separately.
+    %(impute_keys)s
     n_pv
         Number of principal components computed per dataset, and hence the maximum number of principal vectors.
         Must be at least 2, at most the number of shared genes that vary in both datasets, and smaller than
@@ -84,38 +76,20 @@ def impute_spage(
     %(n_jobs_threads)s
         A positive value also caps the BLAS and OpenMP threads (via ``threadpoolctl``), which `None` and
         ``-1`` leave as configured.
-    inplace
-        If `True`, store the result in the query, otherwise return it.
+    %(impute_inplace)s
 
     Returns
     -------
-    If ``inplace = False``, returns a :class:`pandas.DataFrame` with the query's cells as rows and ``genes``
-    as columns.
-
-    Otherwise, stores it in the query's ``obsm[key_added]`` and returns `None`.
+    %(impute_returns)s
     """
-    ref_table, query_table = resolve_pair(table_key, name="table_key")
-    ref_layer, query_layer = resolve_pair(layer, name="layer")
-    data_query = query_of(
-        data_ref, data_query, ref_address=(ref_table,), query_address=(query_table,), key_name="table_key"
+    ref, query, genes, shared, ref_layer, query_layer = resolve_ref_query(
+        data_ref, data_query, genes=genes, table_key=table_key, layer=layer
     )
-    ref = resolve_table(data_ref, ref_table, side="reference")
-    query = resolve_table(data_query, query_table, side="query")
-    for side, adata in (("reference", ref), ("query", query)):
-        if not adata.var_names.is_unique:
-            raise ValueError(f"The {side} has duplicate gene names; make them unique with `var_names_make_unique`.")
-
     n_threads = get_n_numba_threads(n_jobs)
     assert_in_range(n_neighbors, 1, ref.n_obs, name="n_neighbors")
     if not 0 <= cosine_threshold < 1:
         raise ValueError(f"Expected `cosine_threshold` to be in interval `[0, 1)`, found `{cosine_threshold}`.")
 
-    genes = assert_non_empty_sequence(genes, name="genes")
-    if missing := [g for g in genes if g not in ref.var_names]:
-        raise KeyError(f"Genes not found in the reference: {missing}.")
-    shared = query.var_names.intersection(ref.var_names, sort=False).tolist()
-    if not shared:
-        raise ValueError("The reference and the query have no genes in common.")
     # the bounds known before scaling; constant genes lower the gene bound below
     assert_in_range(n_pv, 2, min(len(shared), query.n_obs - 1, ref.n_obs - 1), name="n_pv")
 

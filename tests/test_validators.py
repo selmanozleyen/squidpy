@@ -34,6 +34,10 @@ class TestAssertPositive:
         with pytest.raises(ValueError, match="positive"):
             assert_positive(-1, name="x")
 
+    def test_nan_raises(self):
+        with pytest.raises(ValueError, match="positive"):
+            assert_positive(float("nan"), name="x")
+
 
 # assert_non_negative
 class TestAssertNonNegative:
