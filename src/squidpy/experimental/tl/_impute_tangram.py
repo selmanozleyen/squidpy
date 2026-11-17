@@ -11,11 +11,13 @@ from fast_array_utils import stats
 from fast_array_utils.conv import to_dense
 from fast_array_utils.types import CSBase
 from scanpy import logging as logg
+from scipy.sparse import csr_matrix
 from spatialdata import SpatialData
 
 from squidpy._docs import d
 from squidpy._utils import NDArrayA, RNGLike, SeedLike
 from squidpy._validators import assert_isinstance, assert_positive, normalize_choice, options_of
+from squidpy.experimental.tl._impute_spage import _matmul
 from squidpy.experimental.tl._utils import resolve_ref_query
 from squidpy.gr._utils import _extract_expression, _save_data
 
@@ -105,9 +107,11 @@ def impute_tangram(
         num_epochs=num_epochs,
         learning_rate=learning_rate,
     )
-    y = to_dense(_extract_expression(ref, genes=genes, layer=ref_layer)[0])
-    # on the device, so that only the result is copied back
-    imputed = np.asarray(jnp.matmul(probs.T, jnp.asarray(y, dtype=probs.dtype), precision="highest"))
+    y = _extract_expression(ref, genes=genes, layer=ref_layer)[0]
+    if isinstance(y, CSBase):  # projected on the host, rather than densifying all of `y` for the device
+        imputed = _matmul(csr_matrix(y.T, dtype=np.float32), np.asarray(probs)).T
+    else:  # on the device, so that only the result is copied back
+        imputed = np.asarray(jnp.matmul(probs.T, jnp.asarray(y, dtype=probs.dtype), precision="highest"))
 
     res = pd.DataFrame(imputed, index=query.obs_names, columns=genes, copy=False)
     if not inplace:
