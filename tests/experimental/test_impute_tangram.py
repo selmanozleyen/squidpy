@@ -135,6 +135,13 @@ def test_invalid_input(kwargs, match):
         _impute(ref, query, **kwargs)
 
 
+def test_num_epochs_must_be_integral():
+    ref, query, _ = _data()
+
+    with pytest.raises(TypeError, match="num_epochs"):
+        _impute(ref, query, num_epochs=1.5)
+
+
 def test_missing_jax(monkeypatch):
     ref, query, _ = _data()
     monkeypatch.setitem(sys.modules, "jax", None)

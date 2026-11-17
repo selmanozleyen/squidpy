@@ -42,9 +42,13 @@ def impute_tangram(
     """
     Impute genes in spatial data from a scRNA-seq reference with Tangram :cite:`tangram`.
 
-    Maps reference cells onto query cells as in Tangram's default ``"cells"`` mode and projects the reference
-    expression through the mapping. Unlike `Tangram <https://github.com/broadinstitute/Tangram>`_, gene names
-    are case-sensitive. Needs ``squidpy[jax]``; memory scales with ``n_ref * n_query``.
+    Maps reference cells onto query cells as in Tangram's default ``"cells"`` mode, maximizing the mean per-gene
+    cosine similarity between the mapped and the measured expression plus a KL term towards ``density_prior``,
+    and projects the reference expression through the mapping. Unlike
+    `Tangram <https://github.com/broadinstitute/Tangram>`_, gene names are case-sensitive.
+
+    Needs ``squidpy[jax]``, which installs JAX for the CPU; install ``jax[cuda12]`` for a GPU, where JAX
+    preallocates most of its memory on first use. Memory scales with ``n_ref * n_query``.
 
     Parameters
     ----------

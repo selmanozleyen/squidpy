@@ -20,7 +20,7 @@ def resolve_ref_query(
     table_key: str | Sequence[str | None] | None,
     layer: str | Sequence[str | None] | None,
 ) -> tuple[AnnData, AnnData, list[str], list[str], str | None, str | None]:
-    """Resolve the reference and query tables of an imputation, and validate its layers and ``genes``.
+    """Resolve the reference and query tables of an imputation, split its layers, and validate ``genes``.
 
     Return the reference, the query, the genes to impute, the genes they share, and their layers.
     """

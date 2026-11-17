@@ -66,7 +66,7 @@ def get_valid_values(needle: Sequence[Any], haystack: Sequence[Any]) -> Sequence
 
 
 def assert_positive(value: float, *, name: str) -> None:
-    if value <= 0:
+    if not value > 0:  # also rejects NaN
         raise ValueError(f"Expected `{name}` to be positive, found `{value}`.")
 
 

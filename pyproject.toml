@@ -84,7 +84,7 @@ dependencies = [
 ]
 optional-dependencies.jax = [
   "jax>=0.5.3",
-  "optax",
+  "optax>=0.2.4",
 ]
 optional-dependencies.leiden = [
   "leidenalg",

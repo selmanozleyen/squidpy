@@ -487,7 +487,7 @@ layer
     both sides; a ``(ref, query)`` pair addresses each side separately."""
 _impute_inplace = """\
 inplace
-    If `True`, store the result in the query's ``obsm[key_added]``, otherwise return it."""
+    If `True`, store the result in the query, otherwise return it."""
 _impute_returns = """\
 If ``inplace = False``, a :class:`pandas.DataFrame` with the query's cells as rows and ``genes`` as columns,
 otherwise `None`."""

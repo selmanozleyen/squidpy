@@ -7,14 +7,14 @@ import pandas as pd
 import pytest
 from anndata import AnnData
 
+import squidpy as sq
+from squidpy.experimental.tl._impute_tangram import _density
+
+from ._reference import Bundle, read_bundle
+
 pytest.importorskip("optax")  # needs jax too
+_tangram_jax = pytest.importorskip("squidpy.experimental.tl._tangram_jax")
 pytestmark = [pytest.mark.jax, pytest.mark.internet]
-
-import squidpy as sq  # noqa: E402
-from squidpy.experimental.tl import _tangram_jax  # noqa: E402
-from squidpy.experimental.tl._impute_tangram import _density  # noqa: E402
-
-from ._reference import Bundle, read_bundle  # noqa: E402
 
 _BUNDLE_URL = (
     "https://github.com/theislab/squidpy-ports/releases/download/tangram-reference-v1/tangram_reference.zarr.zip"
@@ -24,7 +24,7 @@ _PRIORS = ["rna_count_based", "uniform", None]
 # ~10x the largest error measured on Linux; float32 trajectories from the same start drift apart, so the
 # tolerances grow with the epochs
 _PROBS_ATOL = {1: 5e-5, 10: 5e-5, 100: 3e-4}
-_IMPUTED_RTOL = {1: 5e-5, 10: 5e-5, 100: 1e-3}
+_IMPUTED_REL_ATOL = {1: 5e-5, 10: 5e-5, 100: 1e-3}
 # by 300 epochs the drift reaches ~1e-2, as large as the differences a tolerance would have to catch, so only
 # that run's loss history is compared
 _LONGEST_EPOCHS = 300
@@ -103,4 +103,4 @@ def test_public_call_matches_upstream(bundle, prior, num_epochs, monkeypatch):
     )
 
     expected = section["imputed"]
-    np.testing.assert_allclose(res.to_numpy(), expected, atol=_IMPUTED_RTOL[num_epochs] * np.abs(expected).max())
+    np.testing.assert_allclose(res.to_numpy(), expected, atol=_IMPUTED_REL_ATOL[num_epochs] * np.abs(expected).max())
