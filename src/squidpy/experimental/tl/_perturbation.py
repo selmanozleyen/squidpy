@@ -159,11 +159,23 @@ def neighbor_distances(
         free, member = rows[c < 0], rows[c >= 0]
         if not len(free) or not len(member):
             continue
-        m = cKDTree(coords[free]).sparse_distance_matrix(cKDTree(coords[member]), max_distance,
-                                                          output_type="coo_matrix")
-        df = pd.DataFrame({"cell": free[m.row], "component": codes[member[m.col]], "distance": m.data})
-        # coincident points (distance exactly 0) are not stored by the sparse matrix: not neighbours
-        frames.append(df.groupby(["component", "cell"], sort=False, as_index=False)["distance"].min())
+        # Per component: candidates in its bounding box grown by `max_distance`, then one nearest-member
+        # query. Memory is O(candidates) instead of O(all pairs within `max_distance`), which matters for
+        # components of 10^4-10^5 cells (tumour lesions).
+        fpos = coords[free]
+        order = np.argsort(fpos[:, 0])
+        xs = fpos[order, 0]
+        for code, idx in pd.Series(member).groupby(c[c >= 0]).indices.items():
+            mpos = coords[member[idx]]
+            lo, hi = np.searchsorted(xs, [mpos[:, 0].min() - max_distance, mpos[:, 0].max() + max_distance])
+            cand = order[lo:hi]
+            ymin, ymax = mpos[:, 1].min() - max_distance, mpos[:, 1].max() + max_distance
+            cand = cand[(fpos[cand, 1] >= ymin) & (fpos[cand, 1] <= ymax)]
+            if not len(cand):
+                continue
+            dist, _ = cKDTree(mpos).query(fpos[cand], distance_upper_bound=max_distance)
+            ok = (dist <= max_distance) & (dist > 0)  # coincident points are not neighbors
+            frames.append(pd.DataFrame({"cell": free[cand[ok]], "component": code, "distance": dist[ok]}))
     if not frames:
         return pd.DataFrame({"component": pd.Categorical([], categories=comp.cat.categories),
                              "obs_name": pd.Series([], dtype=object), "distance": pd.Series([], dtype=float)})
