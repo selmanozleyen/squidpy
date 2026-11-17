@@ -4,6 +4,7 @@
 set -euo pipefail
 OUT=$HOME/spage-knn/$SLURM_JOB_ID; mkdir -p "$OUT"
 S=/localscratch/$USER/$SLURM_JOB_ID; mkdir -p "$S"; cd "$S"
+export OPENBLAS_NUM_THREADS=64  # numpy wheels build OpenBLAS for <= 64 threads; more segfaults
 export UV_CACHE_DIR=$S/uv-cache TMPDIR=$S/tmp; mkdir -p "$TMPDIR"
 hostname; nproc; df -BG /localscratch | tail -1; free -g | head -2
 git clone -q https://github.com/selmanozleyen/squidpy.git repo
