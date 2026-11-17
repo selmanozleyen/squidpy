@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -p cpu_p -q cpu_normal --exclusive --nodes=1 --mem=0 -t 3:00:00 -J spage-knn
-#SBATCH -o /ictstr01/groups/ml01/workspace/selman.ozleyen/spage-knn/%j.log
+#SBATCH -o /home/icb/selman.ozleyen/spage-knn/%j.log
 set -euo pipefail
 OUT=$HOME/spage-knn/$SLURM_JOB_ID; mkdir -p "$OUT"
 S=/localscratch/$USER/$SLURM_JOB_ID; mkdir -p "$S"; cd "$S"
