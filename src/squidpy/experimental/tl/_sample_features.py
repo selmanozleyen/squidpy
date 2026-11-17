@@ -92,7 +92,7 @@ def sample_features(
         Categorical column in :attr:`anndata.AnnData.obs` with the cell clusters.
     connectivity_key
         Key in :attr:`anndata.AnnData.obsp` of the spatial graph. It must not link cells of different samples:
-        build it with :func:`squidpy.gr.spatial_neighbors` and ``library_key``.
+        build it per sample, e.g. with :func:`squidpy.gr.spatial_neighbors_delaunay` and ``library_key``.
     min_cells
         Minimum number of cells of a cluster in a sample for its neighbourhood features to be defined.
     table_key
@@ -117,7 +117,7 @@ def sample_features(
     if (lib[rows] != lib[cols]).any():
         raise ValueError(
             f"`adata.obsp[{connectivity_key!r}]` links cells of different samples. Build the graph per sample with "
-            f"`squidpy.gr.spatial_neighbors(adata, library_key={library_key!r})`."
+            f"e.g. `squidpy.gr.spatial_neighbors_delaunay(adata, library_key={library_key!r})`."
         )
 
     counts = np.bincount(lib * n_k + ct, minlength=n_s * n_k).reshape(n_s, n_k).astype(float)
