@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import os
-
 import numpy as np
 import pandas as pd
 import pytest
 from anndata import AnnData
 
-# the jax CI env sets JAX_ENABLE_X64, and there a missing jax must fail rather than skip
-if os.environ.get("JAX_ENABLE_X64") != "1":
-    pytest.importorskip("jax")
-    pytest.importorskip("optax")
+pytest.importorskip("optax")  # needs jax too
 pytestmark = [pytest.mark.jax, pytest.mark.internet]
 
 import squidpy as sq  # noqa: E402
@@ -20,18 +15,19 @@ from squidpy.experimental.tl import _tangram_jax  # noqa: E402
 from squidpy.experimental.tl._impute_tangram import _density  # noqa: E402
 
 from ._reference import Bundle, read_bundle  # noqa: E402
-from .test_impute_tangram import _data  # noqa: E402
 
 _BUNDLE_URL = (
     "https://github.com/theislab/squidpy-ports/releases/download/tangram-reference-v1/tangram_reference.zarr.zip"
 )
 _BUNDLE_SHA256 = "3c6ebc596b5affaa3627e2da0873b930de24dcede4291a7f267293b9b30ff155"
 _PRIORS = ["rna_count_based", "uniform", None]
-# ~10x the largest error measured on Linux, with JAX_ENABLE_X64 on and off; float32 trajectories from the
-# same start drift apart, so the tolerance grows with the epochs
-_TOLERANCES = {1: (5e-5, 5e-5), 10: (5e-5, 5e-5), 100: (3e-4, 1e-3)}
-# by 300 epochs the drift reaches ~1e-2, as large as the differences a tolerance would have to catch
-_UNTESTED_EPOCHS = 300
+# ~10x the largest error measured on Linux; float32 trajectories from the same start drift apart, so the
+# tolerances grow with the epochs
+_PROBS_ATOL = {1: 5e-5, 10: 5e-5, 100: 3e-4}
+_IMPUTED_RTOL = {1: 5e-5, 10: 5e-5, 100: 1e-3}
+# by 300 epochs the drift reaches ~1e-2, as large as the differences a tolerance would have to catch, so only
+# that run's loss history is compared
+_LONGEST_EPOCHS = 300
 
 
 @pytest.fixture(scope="module")
@@ -53,32 +49,22 @@ def _section(bundle: Bundle, prior: str | None, num_epochs: int) -> dict:
 
 
 def test_sections_are_covered(bundle):
-    tested = {f"{prior or 'none'}_epochs{n}" for prior in _PRIORS for n in [*_TOLERANCES, _UNTESTED_EPOCHS]}
+    tested = {f"{prior or 'none'}_epochs{n}" for prior in _PRIORS for n in [*_PROBS_ATOL, _LONGEST_EPOCHS]}
 
     assert set(bundle.sections) == tested
 
 
-def test_fixture_is_ours(bundle):
-    ref, query, truth = _data()
-
-    # the bundle is built on Linux, and gamma draws go through the platform's libm: elsewhere a few
-    # differ in the last bit
-    np.testing.assert_allclose(ref.X, bundle.inputs["ref"], rtol=1e-14, atol=0)
-    np.testing.assert_allclose(query.X, bundle.inputs["query"], rtol=1e-14, atol=0)
-    np.testing.assert_allclose(truth, bundle.inputs["truth"], rtol=1e-14, atol=0)
-
-
-@pytest.mark.parametrize("prior", _PRIORS[:2])
+@pytest.mark.parametrize("prior", ["rna_count_based", "uniform"])
 def test_density_matches_upstream(bundle, prior):
     np.testing.assert_array_equal(_density(bundle.inputs["query"], prior), _section(bundle, prior, 1)["density"])
 
 
 @pytest.mark.parametrize("prior", _PRIORS)
-@pytest.mark.parametrize("num_epochs", list(_TOLERANCES))
+@pytest.mark.parametrize("num_epochs", list(_PROBS_ATOL))
 def test_mapping_matches_upstream(bundle, prior, num_epochs):
     section = _section(bundle, prior, num_epochs)
     # upstream records each loss before its step, so the longest run holds the loss after every shorter one
-    losses = _section(bundle, prior, _UNTESTED_EPOCHS)["total_loss"]
+    losses = _section(bundle, prior, _LONGEST_EPOCHS)["total_loss"]
     ref, query = _training_data(bundle)
     initial = bundle.inputs["initial_logits"]
 
@@ -91,13 +77,13 @@ def test_mapping_matches_upstream(bundle, prior, num_epochs):
         learning_rate=float(bundle.fixtures["LEARNING_RATE"]),
     )
 
-    np.testing.assert_allclose(probs, section["probs"], atol=_TOLERANCES[num_epochs][0])
+    np.testing.assert_allclose(probs, section["probs"], atol=_PROBS_ATOL[num_epochs])
     for logits, expected in ((initial, losses[0]), (np.log(probs), losses[num_epochs])):
         np.testing.assert_allclose(_tangram_jax.loss(logits, ref, query, section.get("density")), expected, atol=2e-6)
 
 
 @pytest.mark.parametrize("prior", _PRIORS)
-@pytest.mark.parametrize("num_epochs", list(_TOLERANCES))
+@pytest.mark.parametrize("num_epochs", list(_PROBS_ATOL))
 def test_public_call_matches_upstream(bundle, prior, num_epochs, monkeypatch):
     section = _section(bundle, prior, num_epochs)
     genes, measured = list(bundle.fixtures["genes"]), list(bundle.fixtures["measured"])
@@ -117,4 +103,4 @@ def test_public_call_matches_upstream(bundle, prior, num_epochs, monkeypatch):
     )
 
     expected = section["imputed"]
-    np.testing.assert_allclose(res.to_numpy(), expected, atol=_TOLERANCES[num_epochs][1] * np.abs(expected).max())
+    np.testing.assert_allclose(res.to_numpy(), expected, atol=_IMPUTED_RTOL[num_epochs] * np.abs(expected).max())

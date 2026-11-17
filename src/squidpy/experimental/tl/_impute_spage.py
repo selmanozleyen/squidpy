@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 from anndata import AnnData
+from fast_array_utils.conv import to_dense
 from fast_array_utils.types import CSBase
 from scanpy import logging as logg
 from scipy.sparse import csr_matrix
@@ -126,7 +127,7 @@ def impute_spage(
         distances, indices = _cosine_neighbors(ref_proj, query_proj, n_neighbors=n_neighbors, n_jobs=n_threads)
 
         y = _extract_expression(ref, genes=genes, layer=ref_layer)[0]
-        y = csr_matrix(y, dtype=np.result_type(y.dtype, np.float32))
+        y = y.astype(np.result_type(y.dtype, np.float32), copy=False)
         weights = csr_matrix(
             (
                 _spage_weights(distances).astype(y.dtype).ravel(),
@@ -136,7 +137,7 @@ def impute_spage(
             shape=(query.n_obs, ref.n_obs),
         )
         # TODO: use `fast_array_utils.linalg.matmul` once released, which runs this product in parallel
-        imputed = (weights @ y).toarray()
+        imputed = to_dense(weights @ y)
 
     res = pd.DataFrame(imputed, index=query.obs_names, columns=genes, copy=False)
     if not inplace:

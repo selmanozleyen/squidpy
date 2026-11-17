@@ -31,8 +31,9 @@ def resolve_ref_query(
     )
     ref = resolve_table(data_ref, ref_table, side="reference")
     query = resolve_table(data_query, query_table, side="query")
-    if ref is query:
-        raise ValueError("The reference and the query are the same table.")
+    for side, adata in (("reference", ref), ("query", query)):
+        if not adata.var_names.is_unique:
+            raise ValueError(f"The {side} has duplicate gene names; make them unique with `var_names_make_unique`.")
 
     genes = assert_non_empty_sequence(genes, name="genes")
     if missing := [g for g in genes if g not in ref.var_names]:

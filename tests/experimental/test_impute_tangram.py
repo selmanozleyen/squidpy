@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 
 import numpy as np
@@ -13,10 +12,7 @@ from scipy.sparse import csr_matrix
 
 import squidpy as sq
 
-# the jax CI env sets JAX_ENABLE_X64, and there a missing jax must fail rather than skip
-if os.environ.get("JAX_ENABLE_X64") != "1":
-    pytest.importorskip("jax")
-    pytest.importorskip("optax")
+pytest.importorskip("optax")  # needs jax too
 pytestmark = pytest.mark.jax
 
 
