@@ -45,6 +45,21 @@ def test_sample_features_by_hand():
     assert sf.to_df(layer="support").loc["s1", "nhood:A|B"] == 2
 
 
+def test_sample_features_ignores_self_loops_and_stored_zeros():
+    ref = sample_features(_toy(), library_key="sample", cluster_key="ct", min_cells=1).to_df()
+    adata = _toy()
+    g = adata.obsp["spatial_connectivities"].tocoo()
+    # every cell its own neighbour, plus an explicitly stored zero between cells 0 and 3
+    rows = np.r_[g.row, np.arange(7), 0]
+    cols = np.r_[g.col, np.arange(7), 3]
+    data = np.r_[g.data, np.ones(7), 0.0]
+    graph = csr_matrix((data, (rows, cols)), shape=(7, 7))
+    assert graph.nnz == len(g.data) + 8  # the zero is stored
+    adata.obsp["spatial_connectivities"] = graph
+    out = sample_features(adata, library_key="sample", cluster_key="ct", min_cells=1).to_df()
+    pd.testing.assert_frame_equal(out, ref)
+
+
 def test_sample_features_min_cells():
     sf = sample_features(_toy(), library_key="sample", cluster_key="ct", min_cells=3)
     # s1 has 2 A cells, below min_cells; its proportion is still defined

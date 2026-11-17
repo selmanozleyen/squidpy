@@ -111,9 +111,12 @@ def sample_features(
     ct, clusters = _codes(adata, cluster_key)
     n_s, n_k = len(samples), len(clusters)
 
-    graph = csr_matrix(adata.obsp[connectivity_key])
+    graph = csr_matrix(adata.obsp[connectivity_key], copy=True)
+    graph.eliminate_zeros()  # stored zeros are not edges
     rows = np.repeat(np.arange(graph.shape[0]), np.diff(graph.indptr))
     cols = graph.indices
+    not_self = rows != cols  # a cell is not its own neighbour (graphs built with `set_diag=True`)
+    rows, cols = rows[not_self], cols[not_self]
     if (lib[rows] != lib[cols]).any():
         raise ValueError(
             f"`adata.obsp[{connectivity_key!r}]` links cells of different samples. Build the graph per sample with "
