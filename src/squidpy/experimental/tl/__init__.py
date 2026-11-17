@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+from ._perturbation import label_components, neighbourhood_distances
 from ._stitched_labels import make_stitched_labels
 from ._tiling_qc import calculate_tiling_qc
 from ._tiling_stitch import assign_stitch_groups
 
-__all__ = ["assign_stitch_groups", "calculate_tiling_qc", "make_stitched_labels"]
+__all__ = [
+    "assign_stitch_groups",
+    "calculate_tiling_qc",
+    "label_components",
+    "make_stitched_labels",
+    "neighbourhood_distances",
+]
