@@ -35,7 +35,7 @@ def impute_tangram(
     table_key: str | tuple[str | None, str | None] | None = None,
     layer: str | tuple[str | None, str | None] | None = None,
     density_prior: DensityPrior | None = "rna_count_based",
-    num_epochs: int = 1000,
+    n_epochs: int = 1000,
     learning_rate: float = 0.1,
     key_added: str = "tangram",
     rng: SeedLike | RNGLike | None = None,
@@ -61,12 +61,14 @@ def impute_tangram(
     density_prior
         Prior over query cells: ``"rna_count_based"`` (proportional to total counts), ``"uniform"``, or `None`
         (no density term).
-    num_epochs
-        Number of optimization steps.
+    n_epochs
+        Number of optimization steps, Tangram's ``num_epochs``.
     learning_rate
         Adam's learning rate.
     key_added
-        Key in the query's :attr:`anndata.AnnData.obsm` where the result is stored.
+        Key in the query's :attr:`anndata.AnnData.obsm` where the result is stored. The mapping goes to
+        ``obsm[f"{key_added}_mapping"]``: the probability of each reference cell (column) being at each query
+        cell (row), from which, e.g., cell annotations can be projected onto the query.
     %(rng)s
     %(impute_inplace)s
 
@@ -78,8 +80,8 @@ def impute_tangram(
         data_ref, data_query, genes=genes, table_key=table_key, layer=layer
     )
     density_prior = normalize_choice(density_prior, (*options_of(DensityPrior), None), name="density_prior")
-    assert_isinstance(num_epochs, Integral, name="num_epochs")
-    assert_positive(num_epochs, name="num_epochs")
+    assert_isinstance(n_epochs, Integral, name="n_epochs")
+    assert_positive(n_epochs, name="n_epochs")
     assert_positive(learning_rate, name="learning_rate")
     rng = np.random.default_rng(rng)
     try:
@@ -104,7 +106,7 @@ def impute_tangram(
         ref_x[:, expressed],
         query_x[:, expressed],
         density,
-        num_epochs=num_epochs,
+        n_epochs=n_epochs,
         learning_rate=learning_rate,
     )
     y = _extract_expression(ref, genes=genes, layer=ref_layer)[0]
@@ -117,6 +119,7 @@ def impute_tangram(
     if not inplace:
         logg.info("Finish", time=start)
         return res
+    query.obsm[f"{key_added}_mapping"] = np.array(probs).T
     _save_data(query, attr="obsm", key=key_added, data=res, time=start)
     return None
 

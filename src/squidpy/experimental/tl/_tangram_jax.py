@@ -22,14 +22,14 @@ def loss(logits: jax.Array, ref_x: jax.Array, query_x: jax.Array, density: jax.A
     return total
 
 
-@partial(jax.jit, static_argnames="num_epochs", donate_argnums=0)
+@partial(jax.jit, static_argnames="n_epochs", donate_argnums=0)
 def map_cells(
     logits: jax.Array,
     ref_x: jax.Array,
     query_x: jax.Array,
     density: jax.Array | None,
     *,
-    num_epochs: int,
+    n_epochs: int,
     learning_rate: float,
 ) -> jax.Array:
     """Adam, with `torch.optim.Adam`'s defaults, on `loss` from ``logits``; returns the ``(n_ref, n_query)`` mapping."""
@@ -41,5 +41,5 @@ def map_cells(
         updates, opt_state = optimizer.update(grad(logits, ref_x, query_x, density), opt_state)
         return (optax.apply_updates(logits, updates), opt_state), None
 
-    (logits, _), _ = jax.lax.scan(step, (logits, optimizer.init(logits)), length=num_epochs)
+    (logits, _), _ = jax.lax.scan(step, (logits, optimizer.init(logits)), length=n_epochs)
     return jax.nn.softmax(logits, axis=1)

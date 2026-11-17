@@ -44,8 +44,8 @@ def _training_data(bundle: Bundle) -> tuple[np.ndarray, np.ndarray]:
     return ref.astype(np.float32), query.astype(np.float32)
 
 
-def _section(bundle: Bundle, prior: str | None, num_epochs: int) -> dict:
-    return bundle.sections[f"{prior or 'none'}_epochs{num_epochs}"]
+def _section(bundle: Bundle, prior: str | None, n_epochs: int) -> dict:
+    return bundle.sections[f"{prior or 'none'}_epochs{n_epochs}"]
 
 
 def test_sections_are_covered(bundle):
@@ -60,9 +60,9 @@ def test_density_matches_upstream(bundle, prior):
 
 
 @pytest.mark.parametrize("prior", _PRIORS)
-@pytest.mark.parametrize("num_epochs", list(_PROBS_ATOL))
-def test_mapping_matches_upstream(bundle, prior, num_epochs):
-    section = _section(bundle, prior, num_epochs)
+@pytest.mark.parametrize("n_epochs", list(_PROBS_ATOL))
+def test_mapping_matches_upstream(bundle, prior, n_epochs):
+    section = _section(bundle, prior, n_epochs)
     # upstream records each loss before its step, so the longest run holds the loss after every shorter one
     losses = _section(bundle, prior, _LONGEST_EPOCHS)["total_loss"]
     ref, query = _training_data(bundle)
@@ -73,19 +73,19 @@ def test_mapping_matches_upstream(bundle, prior, num_epochs):
         ref,
         query,
         section.get("density"),
-        num_epochs=num_epochs,
+        n_epochs=n_epochs,
         learning_rate=float(bundle.fixtures["LEARNING_RATE"]),
     )
 
-    np.testing.assert_allclose(probs, section["probs"], atol=_PROBS_ATOL[num_epochs])
-    for logits, expected in ((initial, losses[0]), (np.log(probs), losses[num_epochs])):
+    np.testing.assert_allclose(probs, section["probs"], atol=_PROBS_ATOL[n_epochs])
+    for logits, expected in ((initial, losses[0]), (np.log(probs), losses[n_epochs])):
         np.testing.assert_allclose(_tangram_jax.loss(logits, ref, query, section.get("density")), expected, atol=2e-6)
 
 
 @pytest.mark.parametrize("prior", _PRIORS)
-@pytest.mark.parametrize("num_epochs", list(_PROBS_ATOL))
-def test_public_call_matches_upstream(bundle, prior, num_epochs, monkeypatch):
-    section = _section(bundle, prior, num_epochs)
+@pytest.mark.parametrize("n_epochs", list(_PROBS_ATOL))
+def test_public_call_matches_upstream(bundle, prior, n_epochs, monkeypatch):
+    section = _section(bundle, prior, n_epochs)
     genes, measured = list(bundle.fixtures["genes"]), list(bundle.fixtures["measured"])
     map_cells = _tangram_jax.map_cells
     # start from upstream's initial mapping rather than one drawn from `rng`
@@ -97,10 +97,10 @@ def test_public_call_matches_upstream(bundle, prior, num_epochs, monkeypatch):
         AnnData(bundle.inputs["query"], var=pd.DataFrame(index=measured)),
         genes=list(bundle.fixtures["unmeasured"]),
         density_prior=prior,
-        num_epochs=num_epochs,
+        n_epochs=n_epochs,
         learning_rate=float(bundle.fixtures["LEARNING_RATE"]),
         inplace=False,
     )
 
     expected = section["imputed"]
-    np.testing.assert_allclose(res.to_numpy(), expected, atol=_IMPUTED_REL_ATOL[num_epochs] * np.abs(expected).max())
+    np.testing.assert_allclose(res.to_numpy(), expected, atol=_IMPUTED_REL_ATOL[n_epochs] * np.abs(expected).max())

@@ -34,14 +34,14 @@ def _data() -> tuple[AnnData, AnnData, np.ndarray]:
 
 def _impute(data_ref, data_query, **kwargs) -> pd.DataFrame | None:
     return sq.experimental.tl.impute_tangram(
-        data_ref, data_query, **({"genes": _UNMEASURED, "num_epochs": 100, "rng": 0, "inplace": False} | kwargs)
+        data_ref, data_query, **({"genes": _UNMEASURED, "n_epochs": 100, "rng": 0, "inplace": False} | kwargs)
     )
 
 
 def test_recovers_unmeasured_genes():
     ref, query, truth = _data()
 
-    res = _impute(ref, query, num_epochs=300)
+    res = _impute(ref, query, n_epochs=300)
 
     assert res.columns.tolist() == _UNMEASURED
     for imputed, expected in zip(res.to_numpy().T, truth.T, strict=True):
@@ -55,6 +55,12 @@ def test_stores_in_obsm():
     assert _impute(ref, query, inplace=True) is None
 
     pd.testing.assert_frame_equal(query.obsm["tangram"], expected)
+    mapping = query.obsm["tangram_mapping"]
+    assert mapping.shape == (query.n_obs, ref.n_obs)
+    # each reference cell is distributed over the query cells
+    np.testing.assert_allclose(mapping.sum(axis=0), 1, rtol=1e-5)
+    # and the imputed genes are the reference's, projected through the mapping
+    np.testing.assert_allclose(mapping @ ref[:, _UNMEASURED].X, expected.to_numpy(), rtol=1e-4, atol=1e-6)
 
 
 def test_rng():
@@ -119,7 +125,7 @@ def test_unexpressed_genes_are_ignored(unexpressed_in):
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
-        pytest.param({"num_epochs": 0}, "num_epochs", id="num_epochs"),
+        pytest.param({"n_epochs": 0}, "n_epochs", id="n_epochs"),
         pytest.param({"learning_rate": 0}, "learning_rate", id="learning_rate"),
         pytest.param({"density_prior": "foo"}, "density_prior", id="density_prior"),
         pytest.param({"genes": "g7", "layer": (None, "zero")}, "express no gene", id="no-expressed-gene"),
@@ -135,11 +141,11 @@ def test_invalid_input(kwargs, match):
         _impute(ref, query, **kwargs)
 
 
-def test_num_epochs_must_be_integral():
+def test_n_epochs_must_be_integral():
     ref, query, _ = _data()
 
-    with pytest.raises(TypeError, match="num_epochs"):
-        _impute(ref, query, num_epochs=1.5)
+    with pytest.raises(TypeError, match="n_epochs"):
+        _impute(ref, query, n_epochs=1.5)
 
 
 def test_missing_jax(monkeypatch):
