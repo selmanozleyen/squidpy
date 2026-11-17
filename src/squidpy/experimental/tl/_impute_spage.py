@@ -10,7 +10,7 @@ from fast_array_utils.types import CSBase
 from scanpy import logging as logg
 from scipy.sparse import csr_matrix
 from sklearn.neighbors import NearestNeighbors
-from sklearn.preprocessing import StandardScaler, normalize
+from sklearn.preprocessing import StandardScaler
 from spatialdata import SpatialData
 from threadpoolctl import threadpool_limits
 
@@ -183,24 +183,9 @@ def _scale(x: NDArrayA | CSBase) -> tuple[NDArrayA | CSBase, NDArrayA, NDArrayA]
 
 
 def _cosine_neighbors(ref: NDArrayA, query: NDArrayA, *, n_neighbors: int, n_jobs: int) -> tuple[NDArrayA, NDArrayA]:
-    """Cosine distances and indices of each query row's nearest reference rows, as sklearn's `"cosine"` metric gives.
-
-    For unit vectors the cosine distance is half the squared euclidean one, which unlike `"cosine"` takes sklearn's
-    parallel search. A (near-)zero row, which :func:`~sklearn.preprocessing.normalize` leaves as it is, has cosine
-    distance 1 to everything: as a reference row it becomes a unit vector orthogonal to every query row, and the
-    distances of a query row are set to 1.
-    """
-    ref, query = normalize(ref), normalize(query)
-    ref_zero = np.einsum("ij,ij->i", ref, ref) < 0.5
-    query_zero = np.einsum("ij,ij->i", query, query) < 0.5
-    if ref_zero.any():
-        ref = np.hstack([np.where(ref_zero[:, None], 0.0, ref), ref_zero[:, None]])
-        query = np.hstack([query, np.zeros((len(query), 1))])
-    knn = NearestNeighbors(n_neighbors=n_neighbors, algorithm="brute", metric="sqeuclidean", n_jobs=n_jobs)
-    distances, indices = knn.fit(ref).kneighbors(query)
-    distances /= 2
-    distances[query_zero] = 1
-    return distances, indices
+    """Cosine distances and indices of each query row's nearest reference rows."""
+    knn = NearestNeighbors(n_neighbors=n_neighbors, algorithm="brute", metric="cosine", n_jobs=n_jobs)
+    return knn.fit(ref).kneighbors(query)
 
 
 def _spage_weights(distances: NDArrayA) -> NDArrayA:
