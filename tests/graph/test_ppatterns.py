@@ -262,6 +262,6 @@ def test_co_occurrence_unused_category(adata: AnnData):
 
 def test_co_occurrence_library_key_missing(adata: AnnData):
     both = _two_slides(adata)
-    both.obs.loc[both.obs_names[0], "slide"] = np.nan
+    both.obs["slide"] = both.obs["slide"].cat.remove_categories("a")  # slide a's cells: no library
     with pytest.raises(ValueError, match="missing values"):
         co_occurrence(both, cluster_key="leiden", copy=True, library_key="slide")
