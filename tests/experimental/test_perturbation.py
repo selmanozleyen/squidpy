@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from anndata import AnnData
 
-from squidpy.experimental.tl import label_components, neighbourhood_distances
+from squidpy.experimental.tl import label_components, neighbor_distances
 
 
 def _adata(coords, labels, library=None) -> AnnData:
@@ -41,13 +41,13 @@ def test_label_components_min_cells_and_library():
     assert pd.isna(comp.iloc[4])  # singleton dropped by min_cells
 
 
-def test_neighbourhood_distances_matches_brute_force():
+def test_neighbor_distances_matches_brute_force():
     rng = np.random.default_rng(0)
     coords = rng.uniform(0, 100, size=(300, 2))
     labels = np.where(rng.uniform(size=300) < 0.2, rng.choice(["A", "B"], size=300), None)
     adata = _adata(coords, labels)
     label_components(adata, "pert", radius=8.0)
-    res = neighbourhood_distances(adata, "pert_component", max_distance=15.0)
+    res = neighbor_distances(adata, "pert_component", max_distance=15.0)
     comp = adata.obs["pert_component"]
     free = np.flatnonzero(comp.isna().to_numpy())
     expected = {}
@@ -62,11 +62,11 @@ def test_neighbourhood_distances_matches_brute_force():
     np.testing.assert_allclose([got[k] for k in expected], [expected[k] for k in expected])
 
 
-def test_neighbourhood_distances_respects_library():
+def test_neighbor_distances_respects_library():
     coords = [[0, 0], [1, 0], [0, 0], [1, 0]]
     adata = _adata(coords, ["A", None, None, None], library=["s1", "s1", "s2", "s2"])
     label_components(adata, "pert", radius=1.0, library_key="lib")
-    res = neighbourhood_distances(adata, "pert_component", max_distance=5.0, library_key="lib")
+    res = neighbor_distances(adata, "pert_component", max_distance=5.0, library_key="lib")
     assert set(res["obs_name"]) == {"c1"}  # c2/c3 are in another section
 
 
@@ -77,4 +77,4 @@ def test_validation(bad):
         label_components(adata, "pert", radius=bad)
     label_components(adata, "pert", radius=2)
     with pytest.raises(ValueError, match="max_distance"):
-        neighbourhood_distances(adata, "pert_component", max_distance=bad)
+        neighbor_distances(adata, "pert_component", max_distance=bad)

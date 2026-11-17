@@ -5,7 +5,7 @@ changes its *surroundings* needs two spatial primitives, provided here:
 
 - :func:`label_components`: split each perturbation label into spatially connected components (clones),
   the unit of replication for neighbour-effect tests.
-- :func:`neighbourhood_distances`: for every component, the cells outside all components within a given
+- :func:`neighbor_distances`: for every component, the cells outside all components within a given
   distance, with their distance to that component's nearest cell, from which distance bands are cut.
 
 The statistical test itself (clone-level permutation) lives in :mod:`pertpy`.
@@ -23,7 +23,7 @@ from spatialdata import SpatialData
 
 from squidpy.gr._utils import _assert_categorical_obs, _assert_spatial_basis, extract_adata_if_sdata
 
-__all__ = ["label_components", "neighbourhood_distances"]
+__all__ = ["label_components", "neighbor_distances"]
 
 
 def _libraries(adata: AnnData, library_key: str | None) -> list[np.ndarray]:
@@ -109,7 +109,7 @@ def label_components(
     return None
 
 
-def neighbourhood_distances(
+def neighbor_distances(
     adata: AnnData | SpatialData,
     component_key: str,
     *,
