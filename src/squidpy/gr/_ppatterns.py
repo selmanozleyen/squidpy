@@ -333,39 +333,22 @@ def _occur_count(  # noqa: PLR0917, numba requires positional arguments
 
 
 @njit(parallel=True, fastmath=True, cache=True)
-def _co_occurrence_helper(v_x: NDArrayA, v_y: NDArrayA, v_radium: NDArrayA, labs: NDArrayA) -> NDArrayA:
+def _co_occurrence_prob(counts: NDArrayA) -> NDArrayA:
     """
-    Fast co-occurrence probability computation using the new numba-accelerated counting.
+    Co-occurrence probabilities from pair counts.
 
     Parameters
     ----------
-    v_x : np.ndarray, float64
-         x-coordinates.
-    v_y : np.ndarray, float64
-         y-coordinates.
-    v_radium : np.ndarray, float64
-         Distance thresholds (in ascending order).
-    labs : np.ndarray
-         Cluster labels (as integers).
+    counts : np.ndarray
+         ``(k, k, n_thresholds)`` counts of ordered cell pairs ``(c, i)`` within each distance threshold.
 
     Returns
     -------
     occ_prob : np.ndarray
-         A 3D array of shape (k, k, len(v_radium)-1) containing the co-occurrence probabilities.
-    labs_unique : np.ndarray
-         Array of unique labels.
+         ``(k, k, n_thresholds)`` co-occurrence probabilities.
     """
-    n = len(v_x)
-    labs_unique = np.unique(labs)
-    k = len(labs_unique)
-    # l_val is the number of bins; here we assume the thresholds come from v_radium[1:].
-    l_val = len(v_radium) - 1
-    # Compute squared thresholds from the interval (skip the first value)
-    thresholds = (v_radium[1:]) ** 2
-
-    # Compute co-occurence counts.
-    counts = _occur_count(v_x, v_y, thresholds, labs, n, k, l_val)
-
+    k = counts.shape[0]
+    l_val = counts.shape[2]
     occ_prob = np.zeros((k, k, l_val), dtype=np.float64)
     row_sums = counts.sum(axis=0)
     totals = row_sums.sum(axis=0)
@@ -391,6 +374,7 @@ def co_occurrence(
     interval: int | NDArrayA = 50,
     copy: bool = False,
     table_key: str | None = None,
+    library_key: str | None = None,
 ) -> tuple[NDArrayA, NDArrayA] | None:
     """
     Compute co-occurrence probability of clusters.
@@ -403,8 +387,13 @@ def co_occurrence(
     %(spatial_key)s
     interval
         Distances interval at which co-occurrence is computed. If :class:`int`, uniformly spaced interval
-        of the given size will be used.
+        of the given size will be used, spanning the coordinates of all cells.
     %(copy)s
+    library_key
+        Categorical column in :attr:`anndata.AnnData.obs` naming each cell's sample (slide, image). If given,
+        only pairs of cells in the same sample are counted, and the counts of all samples are pooled before
+        the probabilities are computed. Without it, all cells share one coordinate frame, so cells of different
+        samples whose coordinates overlap are counted as co-occurring.
 
     Returns
     -------
@@ -437,12 +426,24 @@ def co_occurrence(
     if len(interval) <= 1:
         raise ValueError(f"Expected interval to be of length `>= 2`, found `{len(interval)}`.")
 
-    spatial_x = spatial[:, 0]
-    spatial_y = spatial[:, 1]
+    if library_key is None:
+        samples = [np.arange(len(labs))]
+    else:
+        _assert_categorical_obs(adata, key=library_key)
+        lib = adata.obs[library_key].cat.codes.to_numpy()
+        if (lib < 0).any():
+            raise ValueError(f"`adata.obs[{library_key!r}]` contains missing values.")
+        order = np.argsort(lib, kind="stable")
+        samples = np.split(order, np.flatnonzero(np.diff(lib[order])) + 1)
 
-    # Compute co-occurrence probabilities using the fast numba routine.
-    out = _co_occurrence_helper(spatial_x, spatial_y, interval, labs)
     start = logg.info(f"Calculating co-occurrence probabilities for `{len(interval)}` intervals")
+    # every category gets a row, used or not: the kernel indexes by category code
+    k = len(original_clust.cat.categories)
+    thresholds = interval[1:] ** 2
+    counts = np.zeros((k, k, len(thresholds)), dtype=np.int64)
+    for idx in samples:
+        counts += _occur_count(spatial[idx, 0], spatial[idx, 1], thresholds, labs[idx], len(idx), k, len(thresholds))
+    out = _co_occurrence_prob(counts)
 
     if copy:
         logg.info("Finish", time=start)

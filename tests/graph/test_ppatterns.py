@@ -226,3 +226,42 @@ def test_use_raw(dummy_adata: AnnData):
     df = spatial_autocorr(dummy_adata, use_raw=True, copy=True)
 
     np.testing.assert_equal(sorted(df.index), sorted(var_names))
+
+
+def _two_slides(adata: AnnData) -> AnnData:
+    """The same slide twice, at the same coordinates, as two libraries."""
+    import anndata as ad
+
+    both = ad.concat([adata, adata], label="slide", keys=["a", "b"], index_unique="-")
+    both.obs["slide"] = both.obs["slide"].astype("category")
+    return both
+
+
+def test_co_occurrence_library_key_keeps_slides_apart(adata: AnnData):
+    interval = np.linspace(*_find_min_max(adata.obsm["spatial"]), num=10)
+    single, _ = co_occurrence(adata, cluster_key="leiden", interval=interval, copy=True)
+    both = _two_slides(adata)
+    per_slide, _ = co_occurrence(both, cluster_key="leiden", interval=interval, copy=True, library_key="slide")
+    pooled, _ = co_occurrence(both, cluster_key="leiden", interval=interval, copy=True)
+    # identical slides: pooling the per-slide counts changes nothing
+    np.testing.assert_allclose(per_slide, single)
+    # overlapping coordinates: without the library, cells of the two slides co-occur with each other
+    assert not np.allclose(pooled, single)
+
+
+def test_co_occurrence_unused_category(adata: AnnData):
+    interval = np.linspace(*_find_min_max(adata.obsm["spatial"]), num=10)
+    ref, _ = co_occurrence(adata, cluster_key="leiden", interval=interval, copy=True)
+    adata.obs["leiden"] = adata.obs["leiden"].cat.add_categories(["unused"])
+    occ, _ = co_occurrence(adata, cluster_key="leiden", interval=interval, copy=True)
+    k = len(adata.obs["leiden"].cat.categories)
+    assert occ.shape == (k, k, len(interval) - 1)
+    np.testing.assert_allclose(occ[:-1, :-1], ref)
+    assert not occ[-1].any() and not occ[:, -1].any()
+
+
+def test_co_occurrence_library_key_missing(adata: AnnData):
+    both = _two_slides(adata)
+    both.obs.loc[both.obs_names[0], "slide"] = np.nan
+    with pytest.raises(ValueError, match="missing values"):
+        co_occurrence(both, cluster_key="leiden", copy=True, library_key="slide")
