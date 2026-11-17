@@ -66,9 +66,10 @@ def impute_tangram(
     learning_rate
         Adam's learning rate.
     key_added
-        Key in the query's :attr:`anndata.AnnData.obsm` where the result is stored. The mapping goes to
-        ``obsm[f"{key_added}_mapping"]``: the probability of each reference cell (column) being at each query
-        cell (row), from which, e.g., cell annotations can be projected onto the query.
+        Key in the query's :attr:`anndata.AnnData.obsm` where the result is stored. With ``inplace = True``, the
+        mapping is stored too, in ``obsm[f"{key_added}_mapping"]``: the probability of each reference cell
+        (column, in the reference's order) being at each query cell (row), from which, e.g., cell annotations
+        can be projected onto the query. It is dense, ``4 * n_query * n_ref`` bytes.
     %(rng)s
     %(impute_inplace)s
 
@@ -119,8 +120,9 @@ def impute_tangram(
     if not inplace:
         logg.info("Finish", time=start)
         return res
-    query.obsm[f"{key_added}_mapping"] = np.array(probs).T
-    _save_data(query, attr="obsm", key=key_added, data=res, time=start)
+    _save_data(query, attr="obsm", key=key_added, data=res)
+    mapping = np.ascontiguousarray(np.asarray(probs).T)
+    _save_data(query, attr="obsm", key=f"{key_added}_mapping", data=mapping, prefix=False, time=start)
     return None
 
 

@@ -489,8 +489,9 @@ _impute_inplace = """\
 inplace
     If `True`, store the result in the query, otherwise return it."""
 _impute_returns = """\
-If ``inplace = False``, a :class:`pandas.DataFrame` with the query's cells as rows and ``genes`` as columns,
-otherwise `None`."""
+If ``inplace = False``, a :class:`pandas.DataFrame` with the query's cells as rows and ``genes`` as columns.
+
+Otherwise, stores it in the query's ``obsm[key_added]`` and returns `None`."""
 
 
 d = DocstringProcessor(

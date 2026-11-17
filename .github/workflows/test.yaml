@@ -224,7 +224,18 @@ jobs:
         run: |
           uvx hatch run hatch-test.py3.14-stable:cov-erase
           uvx hatch run hatch-test.py3.14-stable:run-cov -v --color=yes
-          uvx hatch run hatch-test.py3.13-stable-jax:run-cov -v --color=yes
+
+      - name: run jax coverage tests
+        env:
+          PLATFORM: ubuntu-latest
+          DISPLAY: :42
+          UV_PYTHON: "3.13" # setup-uv set 3.14, which uv would otherwise install the 3.13 env's packages for
+        run: uvx hatch run hatch-test.py3.13-stable-jax:run-cov -v --color=yes
+
+      - name: report coverage
+        env:
+          PLATFORM: ubuntu-latest
+        run: |
           uvx hatch run hatch-test.py3.14-stable:cov-combine
           uvx hatch run hatch-test.py3.14-stable:cov-report
 
