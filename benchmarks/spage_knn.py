@@ -10,7 +10,7 @@ from anndata import AnnData
 
 import squidpy as sq
 
-n_obs, arm, out = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+n_obs, arm, out, n_jobs = int(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
 n_genes, n_measured, rank = 300, 200, 20
 rng = np.random.default_rng(0)
 loadings = rng.normal(size=(rank, n_genes))
@@ -26,7 +26,7 @@ query = AnnData(sample(n_obs)[:, :n_measured], var=pd.DataFrame(index=genes[:n_m
 
 
 def run():
-    return sq.experimental.tl.impute_spage(ref, query, genes=genes[n_measured:], n_jobs=-1, inplace=False)
+    return sq.experimental.tl.impute_spage(ref, query, genes=genes[n_measured:], n_jobs=n_jobs, inplace=False)
 
 
 run()  # warmup
@@ -35,6 +35,6 @@ for _ in range(3):
     t = time.perf_counter()
     res = run()
     times.append(time.perf_counter() - t)
-np.save(f"{out}/{arm}_{n_obs}.npy", res.to_numpy())
-print(json.dumps({"arm": arm, "n_obs": n_obs, "median_s": float(np.median(times)), "times": times,
+np.save(f"{out}/{arm}_{n_obs}_{n_jobs}.npy", res.to_numpy())
+print(json.dumps({"arm": arm, "n_obs": n_obs, "n_jobs": n_jobs, "median_s": float(np.median(times)), "times": times,
                   "checksum": float(res.to_numpy().sum())}), flush=True)
