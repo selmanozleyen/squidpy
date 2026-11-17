@@ -163,6 +163,7 @@ def sample_features(
 def _fit_one(
     df: pd.DataFrame,
     formula: str,
+    *,
     method: str,
     groups: str | None,
     duration_key: str | None,
@@ -188,12 +189,22 @@ def _fit_one(
         z = params / bse
         pval = pd.Series(res.pvalues, index=names)
         return pd.DataFrame(
-            {"term": [_RESERVED], "coef": [params[_RESERVED]], "se": [bse[_RESERVED]], "stat": [z[_RESERVED]],
-             "pval": [pval[_RESERVED]]}
+            {
+                "term": [_RESERVED],
+                "coef": [params[_RESERVED]],
+                "se": [bse[_RESERVED]],
+                "stat": [z[_RESERVED]],
+                "pval": [pval[_RESERVED]],
+            }
         )
     return pd.DataFrame(
-        {"term": terms, "coef": res.params[terms].to_numpy(), "se": res.bse[terms].to_numpy(),
-         "stat": stat[terms].to_numpy(), "pval": res.pvalues[terms].to_numpy()}
+        {
+            "term": terms,
+            "coef": res.params[terms].to_numpy(),
+            "se": res.bse[terms].to_numpy(),
+            "stat": stat[terms].to_numpy(),
+            "pval": res.pvalues[terms].to_numpy(),
+        }
     )
 
 
@@ -273,7 +284,9 @@ def sample_associations(
             # convergence and boundary warnings of individual fits: the fit is kept, its p-value reported as is
             warnings.simplefilter("ignore")
             try:
-                fit = _fit_one(df, formula, method, groups, duration_key, event_key)
+                fit = _fit_one(
+                    df, formula, method=method, groups=groups, duration_key=duration_key, event_key=event_key
+                )
             except (np.linalg.LinAlgError, ValueError):
                 continue
         results.append(fit.assign(feature=name, n=len(df)))
