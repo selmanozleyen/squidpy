@@ -74,7 +74,7 @@ def impute_spage(
     key_added
         Key in the query's :attr:`anndata.AnnData.obsm` where the result is stored.
     %(n_jobs_threads)s
-        A positive value also caps the BLAS and OpenMP threads (via :mod:`threadpoolctl`), which `None` and
+        A positive value also caps the BLAS and OpenMP threads (via ``threadpoolctl``), which `None` and
         ``-1`` leave as configured.
     %(impute_inplace)s
 
@@ -89,6 +89,9 @@ def impute_spage(
     assert_in_range(n_neighbors, 1, ref.n_obs, name="n_neighbors")
     if not 0 <= cosine_threshold < 1:
         raise ValueError(f"Expected `cosine_threshold` to be in interval `[0, 1)`, found `{cosine_threshold}`.")
+
+    # the bounds known before scaling; constant genes lower the gene bound below
+    assert_in_range(n_pv, 2, min(len(shared), query.n_obs - 1, ref.n_obs - 1), name="n_pv")
 
     start = logg.info(f"Imputing `{len(genes)}` genes with SpaGE using `{n_threads}` thread(s)")
     with threadpool_limits(None if n_jobs in (None, -1) else n_threads):
