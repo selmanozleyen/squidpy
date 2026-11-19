@@ -72,9 +72,9 @@ def test_sample_features_log2fe_sign():
     x = sample_features(_toy(), library_key="sample", cluster_key="ct", min_cells=1).to_df()
     assert x.loc["s1", "log2fe:A|A"] > 0
     assert x.loc["s1", "log2fe:A|B"] < 0
-    # by hand: A -> A pairs 2, A -> B 1, A out-degree 3; expectations (2 - 1) / 3 and 2 / 3
-    assert x.loc["s1", "log2fe:A|A"] == pytest.approx(np.log2((2 + 1 / 3) / 4 / (1 / 3)))
-    assert x.loc["s1", "log2fe:A|B"] == pytest.approx(np.log2((1 + 2 / 3) / 4 / (2 / 3)))
+    # by hand: A -> A pairs 2, A -> B 1, A out-degree 3; expected pairs 3 * (2 - 1) / 3 = 1 and 3 * 2 / 3 = 2
+    assert x.loc["s1", "log2fe:A|A"] == pytest.approx(np.log2(2.5 / 1.5))
+    assert x.loc["s1", "log2fe:A|B"] == pytest.approx(np.log2(1.5 / 2.5))
 
 
 def _one_sample(ct, rows, cols):
@@ -93,7 +93,9 @@ def test_sample_features_absent_pair_is_depleted():
     rows = list(range(9)) + list(range(10, 16)) + list(range(17, 416))
     cols = list(range(1, 10)) + list(range(11, 17)) + list(range(18, 417))
     x = sample_features(_one_sample(ct, rows, cols), library_key="s", cluster_key="ct", min_cells=1).to_df()
-    assert x.loc["s", "log2fe:A|B"] == pytest.approx(np.log2(1 / (18 + 1)))  # 18 ordered A pairs, none to B
+    # 18 ordered pairs from A cells, none to B; random labelling expects 18 * 7 / 416 of them
+    assert x.loc["s", "log2fe:A|B"] == pytest.approx(np.log2(0.5 / (18 * 7 / 416 + 0.5)))
+    assert x.loc["s", "log2fe:A|B"] < 0
 
 
 def test_sample_features_log2fe_is_zero_under_random_labels():
@@ -103,7 +105,7 @@ def test_sample_features_log2fe_is_zero_under_random_labels():
     keep = rows != cols
     vals = []
     for _ in range(200):
-        ct = rng.choice(["A", "B", "C"], size=n, p=[0.6, 0.35, 0.05])
+        ct = rng.choice(["A", "B", "C"], size=n, p=[0.6, 0.3, 0.1])
         x = sample_features(_one_sample(ct, rows[keep], cols[keep]), library_key="s", cluster_key="ct", min_cells=1)
         vals.append(x.to_df().loc["s", ["log2fe:A|C", "log2fe:C|A", "log2fe:C|C"]].to_numpy(float))
     assert np.abs(np.nanmean(vals, axis=0)).max() < 0.1

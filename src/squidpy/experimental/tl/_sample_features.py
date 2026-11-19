@@ -84,9 +84,10 @@ def sample_features(
         - ``prop:a`` - fraction of the sample's cells in cluster ``a``.
         - ``nhood:a|b`` - fraction of the spatial-graph neighbours of ``a`` cells that are ``b`` cells.
         - ``log2fe:a|b`` - log2 of ``nhood:a|b`` over its expectation under random labelling within the sample,
-          ``(n_b - [a = b]) / (n - 1)``. The observed fraction is shrunk towards that expectation by one pseudo-pair
-          (so it stays finite without zero contacts) and is ``0`` on average under random labelling; ``> 0`` means
-          ``b`` is enriched around ``a``. Missing when the sample has no ``b`` cell other than the ``a`` cell itself.
+          ``(n_b - [a = b]) / (n - 1)``, computed on counts: ``log2((pairs_ab + 1/2) / (expected_ab + 1/2))`` with
+          ``expected_ab`` the number of ``a -> b`` pairs random labelling gives. It is about ``0`` under random
+          labelling, finite without contacts, shrunk towards ``0`` when few pairs are expected; ``> 0`` means ``b`` is
+          enriched around ``a``. Missing when the sample has no ``b`` cell other than the ``a`` cell itself.
 
     Neighbourhood features of a cluster with fewer than ``min_cells`` cells in a sample are ``NaN``.
 
@@ -143,9 +144,9 @@ def sample_features(
         nhood = pairs / out_deg
         # expected fraction of b among a's neighbours under random labelling: (n_b - [a == b]) / (n - 1)
         expected = (counts[:, None, :] - np.eye(n_k)[None]) / (n_cells[:, :, None] - 1)
-        # one pseudo-pair distributed as expected: shrinks towards log2fe = 0 rather than towards 1 / n_clusters,
-        # which would make an absent pair look enriched when b is rare
-        log2fe = np.log2((pairs + expected) / (out_deg + 1) / expected)
+        # observed over expected pair counts, half a pseudo-count on both: 0 under random labelling, and an absent
+        # pair is never "enriched" (a pseudo-count on the fractions instead pulls them towards 1 / n_clusters)
+        log2fe = np.log2((pairs + 0.5) / (out_deg * expected + 0.5))
     undefined = (counts < min_cells)[:, :, None] | (out_deg == 0)
     log2fe[expected <= 0] = np.nan
     nhood[np.broadcast_to(undefined, nhood.shape)] = np.nan
