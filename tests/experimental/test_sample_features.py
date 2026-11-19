@@ -169,6 +169,21 @@ def test_sample_associations_drops_missing():
     assert res.loc["signal", "n"] == sa.n_obs - 5
 
 
+def test_sample_associations_skips_single_level_factor():
+    sa = _samples()
+    one_arm = sa.obs["condition"] == sa.obs["condition"].cat.categories[0]
+    sa.X[~one_arm.to_numpy(), 0] = np.nan  # the feature is only defined in one condition
+    res = sample_associations(sa, "~ C(condition)").set_index("feature")
+    assert "signal" not in res.index  # no p-value rather than the intercept's
+
+
+def test_sample_associations_rejects_covariate_varying_within_group():
+    sa = _samples()
+    sa.obs["image_qc"] = np.arange(sa.n_obs, dtype=float)  # differs between the images of a patient
+    with pytest.raises(ValueError, match="constant within groups"):
+        sample_associations(sa, "~ C(condition) + image_qc", groups="patient")
+
+
 def test_sample_associations_ignores_columns_named_inside_terms():
     sa = _samples()
     sa.obs["ondition"] = np.nan  # a substring of "condition", not a term of the formula

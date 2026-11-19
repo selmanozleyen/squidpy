@@ -173,6 +173,15 @@ def sample_features(
     return AnnData(X=x, obs=obs, var=var, layers={"support": support})
 
 
+def _require_full_rank(exog: np.ndarray) -> None:
+    """Raise if the design is rank-deficient, e.g. a factor left with one level after dropping missing rows.
+
+    Fitting would still return numbers: with a pseudo-inverse the collinear term gets the intercept's test.
+    """
+    if np.linalg.matrix_rank(exog) < exog.shape[1]:
+        raise ValueError("Rank-deficient design.")
+
+
 def _fit_one(
     df: pd.DataFrame,
     formula: str,
@@ -188,15 +197,19 @@ def _fit_one(
     rhs = formula.split("~", 1)[-1].strip()
     if method == "ols":
         res = smf.ols(f"{_RESERVED} ~ {rhs}", df).fit()
+        _require_full_rank(res.model.exog)
         terms = [t for t in res.params.index if t != "Intercept"]
         stat = res.tvalues
     elif method == "mixedlm":
         res = smf.mixedlm(f"{_RESERVED} ~ {rhs}", df, groups=groups).fit(reml=True)
+        _require_full_rank(res.model.exog)
         terms = [t for t in res.fe_params.index if t != "Intercept"]
         stat = res.tvalues
     else:  # cox: the feature is a covariate of survival
         covariates = f"{_RESERVED} + {rhs}" if rhs not in ("", "1") else _RESERVED
-        res = PHReg.from_formula(f"{duration_key} ~ {covariates}", df, status=df[event_key].to_numpy()).fit()
+        model = PHReg.from_formula(f"{duration_key} ~ {covariates}", df, status=df[event_key].to_numpy())
+        _require_full_rank(model.exog)
+        res = model.fit()
         names = res.model.exog_names
         params, bse = pd.Series(res.params, index=names), pd.Series(res.bse, index=names)
         z = params / bse
@@ -284,6 +297,13 @@ def sample_associations(
     rhs = formula.split("~", 1)[-1]
     # rows missing anything the model uses are dropped up front, so every model sees the same rows
     used = [c for c in obs.columns if _in_formula(c, rhs) or c in (groups, duration_key, event_key)]
+    if groups is not None and method != "mixedlm":
+        varying = [c for c in used if c != groups and obs.groupby(groups, observed=True)[c].nunique().max() > 1]
+        if varying:
+            raise ValueError(
+                f"Pseudobulking by {groups!r} needs covariates constant within groups; {varying} vary. "
+                "Average them per group first, or use `method='mixedlm'`."
+            )
     results = []
     for j, name in enumerate(names):
         df = obs.assign(**{_RESERVED: x[:, j]}).dropna(subset=[_RESERVED, *used])
