@@ -9,6 +9,7 @@ optional random effect for samples that share a patient.
 
 from __future__ import annotations
 
+import re
 import warnings
 from collections.abc import Sequence
 from typing import Literal
@@ -26,6 +27,11 @@ from squidpy.gr._utils import _assert_categorical_obs, _assert_connectivity_key,
 __all__ = ["sample_associations", "sample_features"]
 
 _RESERVED = "_y"
+
+
+def _in_formula(column: str, rhs: str) -> bool:
+    """Whether ``column`` appears in the formula as a whole name (``age`` is not in ``~ stage``)."""
+    return re.search(rf"(?<![\w.]){re.escape(column)}(?![\w.])", rhs) is not None
 
 
 def _codes(adata: AnnData, key: str) -> tuple[np.ndarray, pd.Index]:
@@ -78,7 +84,9 @@ def sample_features(
         - ``prop:a`` - fraction of the sample's cells in cluster ``a``.
         - ``nhood:a|b`` - fraction of the spatial-graph neighbours of ``a`` cells that are ``b`` cells.
         - ``log2fe:a|b`` - log2 of ``nhood:a|b`` over its expectation under random labelling within the sample,
-          with half a pseudo-count on both; ``> 0`` means ``b`` is enriched around ``a``.
+          ``(n_b - [a = b]) / (n - 1)``. The observed fraction is shrunk towards that expectation by one pseudo-pair
+          (so it stays finite without zero contacts) and is ``0`` on average under random labelling; ``> 0`` means
+          ``b`` is enriched around ``a``. Missing when the sample has no ``b`` cell other than the ``a`` cell itself.
 
     Neighbourhood features of a cluster with fewer than ``min_cells`` cells in a sample are ``NaN``.
 
@@ -134,11 +142,12 @@ def sample_features(
         prop = counts / n_cells
         nhood = pairs / out_deg
         # expected fraction of b among a's neighbours under random labelling: (n_b - [a == b]) / (n - 1)
-        exp_num = counts[:, None, :] - np.eye(n_k)[None]
-        exp_den = n_cells[:, :, None] - 1
-        observed_frac = (pairs + 0.5) / (out_deg + 0.5 * n_k)
-        log2fe = np.log2(observed_frac / ((exp_num + 0.5) / (exp_den + 0.5 * n_k)))
+        expected = (counts[:, None, :] - np.eye(n_k)[None]) / (n_cells[:, :, None] - 1)
+        # one pseudo-pair distributed as expected: shrinks towards log2fe = 0 rather than towards 1 / n_clusters,
+        # which would make an absent pair look enriched when b is rare
+        log2fe = np.log2((pairs + expected) / (out_deg + 1) / expected)
     undefined = (counts < min_cells)[:, :, None] | (out_deg == 0)
+    log2fe[expected <= 0] = np.nan
     nhood[np.broadcast_to(undefined, nhood.shape)] = np.nan
     log2fe[np.broadcast_to(undefined, log2fe.shape)] = np.nan
 
@@ -273,7 +282,7 @@ def sample_associations(
     obs = sample_adata.obs
     rhs = formula.split("~", 1)[-1]
     # rows missing anything the model uses are dropped up front, so every model sees the same rows
-    used = [c for c in obs.columns if c in rhs or c in (groups, duration_key, event_key)]
+    used = [c for c in obs.columns if _in_formula(c, rhs) or c in (groups, duration_key, event_key)]
     results = []
     for j, name in enumerate(names):
         df = obs.assign(**{_RESERVED: x[:, j]}).dropna(subset=[_RESERVED, *used])
