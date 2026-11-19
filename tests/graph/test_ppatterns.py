@@ -250,6 +250,27 @@ def test_co_occurrence_library_key_keeps_slides_apart(adata: AnnData):
     assert not np.allclose(pooled, single)
 
 
+def test_co_occurrence_single_sample_matches_original_normalisation(adata: AnnData):
+    """One sample: the per-sample expectation reduces exactly to the original P(i | c) / P(i) formula."""
+    from squidpy.gr._ppatterns import _occur_count, fp, ip
+
+    interval = np.linspace(*_find_min_max(adata.obsm["spatial"]), num=6, dtype=fp)
+    out, _ = co_occurrence(adata, cluster_key="leiden", interval=interval, copy=True)
+    labs = adata.obs["leiden"].cat.codes.to_numpy().astype(ip)
+    k = len(adata.obs["leiden"].cat.categories)
+    xy = adata.obsm["spatial"].astype(fp)
+    counts = _occur_count(xy[:, 0], xy[:, 1], interval[1:] ** 2, labs, len(labs), k, len(interval) - 1)
+    row = counts.sum(axis=0).astype(float)
+    ref = np.zeros_like(out)
+    for r in range(counts.shape[2]):
+        probs = row[:, r] / row[:, r].sum()
+        for c in range(k):
+            for i in range(k):
+                if probs[i] and row[c, r]:
+                    ref[i, c, r] = counts[c, i, r] / row[c, r] / probs[i]
+    np.testing.assert_allclose(out, ref, rtol=1e-6)
+
+
 def test_co_occurrence_library_key_uses_each_slides_composition():
     """A type present in one slide only, placed at random, must not look co-occurring with itself."""
     import anndata as ad
