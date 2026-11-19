@@ -88,6 +88,9 @@ def sample_features(
           ``expected_ab`` the number of ``a -> b`` pairs random labelling gives. It is about ``0`` under random
           labelling, finite without contacts, shrunk towards ``0`` when few pairs are expected; ``> 0`` means ``b`` is
           enriched around ``a``. Missing when the sample has no ``b`` cell other than the ``a`` cell itself.
+          With few expected pairs the log of a small ratio is biased downward under random labelling (about -0.2 to
+          -0.45 below ~6 expected pairs, below 0.05 in magnitude from ~30); because this depends on how rare ``b`` is,
+          compare groups on pairs with enough expected contacts (``.layers['support']``, ``min_cells``).
 
     Neighbourhood features of a cluster with fewer than ``min_cells`` cells in a sample are ``NaN``.
 

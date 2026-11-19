@@ -87,6 +87,28 @@ def _one_sample(ct, rows, cols):
     return adata
 
 
+def test_sample_features_log2fe_low_count_bias_shrinks_with_expected_pairs():
+    """Under random labelling the log ratio is biased downward for rare pairs; the bias vanishes as counts grow."""
+    from sklearn.neighbors import NearestNeighbors
+
+    rng = np.random.default_rng(0)
+    n = 1000
+    xy = rng.uniform(0, 1, (n, 2))
+    idx = NearestNeighbors(n_neighbors=7).fit(xy).kneighbors(xy, return_distance=False)[:, 1:]
+    rows, cols = np.repeat(np.arange(n), 6), idx.ravel()
+    bias = {}
+    for frac in (0.03, 0.15):
+        vals = []
+        for _ in range(150):
+            ct = np.where(rng.random(n) < frac, "R", "A")
+            x = sample_features(_one_sample(ct, rows, cols), library_key="s", cluster_key="ct", min_cells=1)
+            vals.append(x.to_df().loc["s", "log2fe:R|R"])
+        bias[frac] = np.nanmean(vals)
+    assert -0.45 < bias[0.03] < 0  # few expected pairs: biased downward, bounded
+    assert abs(bias[0.15]) < 0.06  # many expected pairs: negligible
+    assert abs(bias[0.15]) < abs(bias[0.03])
+
+
 def test_sample_features_absent_pair_is_depleted():
     # 10 A cells in a chain, 7 B cells touching only each other, many C cells: A never touches B
     ct = ["A"] * 10 + ["B"] * 7 + ["C"] * 400
