@@ -184,6 +184,12 @@ def test_sample_associations_rejects_covariate_varying_within_group():
         sample_associations(sa, "~ C(condition) + image_qc", groups="patient")
 
 
+def test_sample_associations_mixedlm_needs_repeated_groups():
+    sa = _samples(per_patient=1)
+    with pytest.raises(ValueError, match="single sample"):
+        sample_associations(sa, "~ C(condition)", method="mixedlm", groups="patient")
+
+
 def test_sample_associations_ignores_columns_named_inside_terms():
     sa = _samples()
     sa.obs["ondition"] = np.nan  # a substring of "condition", not a term of the formula

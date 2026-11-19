@@ -297,6 +297,11 @@ def sample_associations(
     rhs = formula.split("~", 1)[-1]
     # rows missing anything the model uses are dropped up front, so every model sees the same rows
     used = [c for c in obs.columns if _in_formula(c, rhs) or c in (groups, duration_key, event_key)]
+    if method == "mixedlm" and obs[groups].value_counts().max() < 2:
+        raise ValueError(
+            f"Every {groups!r} has a single sample, so a random intercept cannot be estimated and the mixed model's "
+            "tests are not calibrated. Use `method='ols'` (with one sample per group it is the same pseudobulk)."
+        )
     if groups is not None and method != "mixedlm":
         varying = [c for c in used if c != groups and obs.groupby(groups, observed=True)[c].nunique().max() > 1]
         if varying:
@@ -313,6 +318,8 @@ def sample_associations(
             df = df.groupby(groups, observed=True).agg(agg).reset_index()
         if len(df) < min_samples or df[_RESERVED].nunique() < 2:
             continue
+        if method == "mixedlm" and df[groups].value_counts().max() < 2:
+            continue  # only single-sample groups left for this feature: the random intercept is not identifiable
         with warnings.catch_warnings():
             # convergence and boundary warnings of individual fits: the fit is kept, its p-value reported as is
             warnings.simplefilter("ignore")
