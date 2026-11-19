@@ -332,35 +332,29 @@ def _occur_count(  # noqa: PLR0917, numba requires positional arguments
     return result
 
 
-@njit(parallel=True, fastmath=True, cache=True)
-def _co_occurrence_prob(counts: NDArrayA) -> NDArrayA:
+def _expected_pairs(counts: NDArrayA) -> NDArrayA:
     """
-    Co-occurrence probabilities from pair counts.
+    Pair counts expected if cell types were independent within the sample, from the sample's own marginals.
 
-    Parameters
-    ----------
-    counts : np.ndarray
-         ``(k, k, n_thresholds)`` counts of ordered cell pairs ``(c, i)`` within each distance threshold.
-
-    Returns
-    -------
-    occ_prob : np.ndarray
-         ``(k, k, n_thresholds)`` co-occurrence probabilities.
+    ``expected[c, i, r] = n_c(r) * n_i(r) / n(r)``, with ``n_c(r)`` the number of pairs of a ``c`` cell within
+    threshold ``r`` and ``n(r)`` all pairs within ``r``.
     """
-    k = counts.shape[0]
-    l_val = counts.shape[2]
-    occ_prob = np.zeros((k, k, l_val), dtype=np.float64)
-    row_sums = counts.sum(axis=0)
-    totals = row_sums.sum(axis=0)
+    row = counts.sum(axis=0).astype(np.float64)  # (k, n_thresholds), symmetric counts: row == column sums
+    total = row.sum(axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(total > 0, row[:, None, :] * row[None, :, :] / total, 0.0)
 
-    for r in prange(l_val):
-        probs = row_sums[:, r] / totals[r]
-        for c in range(k):
-            for i in range(k):
-                if probs[i] != 0.0 and row_sums[c, r] != 0.0:
-                    occ_prob[i, c, r] = (counts[c, i, r] / row_sums[c, r]) / probs[i]
 
-    return occ_prob
+def _co_occurrence_ratio(counts: NDArrayA, expected: NDArrayA) -> NDArrayA:
+    """
+    Co-occurrence ratio: observed over expected pair counts, both summed over samples; ``[i, c, r]`` layout.
+
+    For one sample this is ``P(i | c within r) / P(i within r)``. Over several samples each sample's expectation
+    uses its own composition, so a cell type abundant in a few samples does not look co-occurring with itself.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = np.where(expected > 0, counts / expected, 0.0)
+    return np.ascontiguousarray(out.transpose(1, 0, 2))
 
 
 @d.dedent
@@ -441,9 +435,12 @@ def co_occurrence(
     k = len(original_clust.cat.categories)
     thresholds = interval[1:] ** 2
     counts = np.zeros((k, k, len(thresholds)), dtype=np.int64)
+    expected = np.zeros((k, k, len(thresholds)), dtype=np.float64)
     for idx in samples:
-        counts += _occur_count(spatial[idx, 0], spatial[idx, 1], thresholds, labs[idx], len(idx), k, len(thresholds))
-    out = _co_occurrence_prob(counts)
+        c = _occur_count(spatial[idx, 0], spatial[idx, 1], thresholds, labs[idx], len(idx), k, len(thresholds))
+        counts += c
+        expected += _expected_pairs(c)
+    out = _co_occurrence_ratio(counts, expected)
 
     if copy:
         logg.info("Finish", time=start)

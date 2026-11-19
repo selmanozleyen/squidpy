@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import numpy as np
+import pandas as pd
 import pytest
 from anndata import AnnData
 from pandas.testing import assert_frame_equal
@@ -247,6 +248,25 @@ def test_co_occurrence_library_key_keeps_slides_apart(adata: AnnData):
     np.testing.assert_allclose(per_slide, single)
     # overlapping coordinates: without the library, cells of the two slides co-occur with each other
     assert not np.allclose(pooled, single)
+
+
+def test_co_occurrence_library_key_uses_each_slides_composition():
+    """A type present in one slide only, placed at random, must not look co-occurring with itself."""
+    import anndata as ad
+
+    rng = np.random.default_rng(0)
+    n = 1500
+    slides = []
+    for name, types in (("a", ["x", "y"]), ("b", ["x", "z"])):
+        obs = pd.DataFrame({"ct": rng.choice(types, n), "slide": name}, index=[f"{name}{i}" for i in range(n)])
+        slides.append(ad.AnnData(np.zeros((n, 1)), obs=obs, obsm={"spatial": rng.uniform(0, 1000, (n, 2))}))
+    both = ad.concat(slides)
+    both.obs["ct"] = both.obs["ct"].astype("category")
+    both.obs["slide"] = both.obs["slide"].astype("category")
+    occ, _ = co_occurrence(both, cluster_key="ct", interval=np.linspace(0, 200, 5), copy=True, library_key="slide")
+    z = list(both.obs["ct"].cat.categories).index("z")
+    # random placement within the slide: ratio ~1 (pooled marginals would give ~2, z being half of slide b only)
+    np.testing.assert_allclose(occ[z, z], 1, atol=0.15)
 
 
 def test_co_occurrence_unused_category(adata: AnnData):
