@@ -158,7 +158,7 @@ def _samples(n_patients: int = 30, per_patient: int = 2, effect: float = 1.0, se
 
 @pytest.mark.parametrize("method", ["ols", "mixedlm"])
 def test_sample_associations_recovers_effect(method):
-    res = sample_associations(_samples(effect=2.0), "~ C(condition)", method=method, groups="patient")
+    res = sample_associations(_samples(effect=2.0), "~ C(condition)", method=method, replicate_key="patient")
     res = res.set_index("feature")
     assert res.loc["signal", "pval_adj"] < 0.01
     assert res.loc["null", "pval"] > 0.01
@@ -166,7 +166,7 @@ def test_sample_associations_recovers_effect(method):
 
 
 def test_sample_associations_pseudobulk_counts_patients():
-    res = sample_associations(_samples(n_patients=30, per_patient=3), "~ C(condition)", groups="patient")
+    res = sample_associations(_samples(n_patients=30, per_patient=3), "~ C(condition)", replicate_key="patient")
     assert (res["n"] == 30).all()
     res = sample_associations(_samples(n_patients=30, per_patient=3), "~ C(condition)")
     assert (res["n"] == 90).all()
@@ -179,7 +179,7 @@ def test_sample_associations_cox():
     sa.obs["time"] = rng.exponential(1 / np.exp(risk))
     sa.obs["event"] = 1
     res = sample_associations(sa, "~ 1", method="cox", duration_key="time", event_key="event").set_index("feature")
-    assert set(res["term"]) == {"_y"}
+    assert set(res["term"]) == {"feature"}
     assert res.loc["signal", "coef"] > 0
     assert res.loc["signal", "pval"] < 0.01
 
@@ -196,20 +196,21 @@ def test_sample_associations_skips_single_level_factor():
     one_arm = sa.obs["condition"] == sa.obs["condition"].cat.categories[0]
     sa.X[~one_arm.to_numpy(), 0] = np.nan  # the feature is only defined in one condition
     res = sample_associations(sa, "~ C(condition)").set_index("feature")
-    assert "signal" not in res.index  # no p-value rather than the intercept's
+    assert np.isnan(res.loc["signal", "pval"])  # no p-value rather than the intercept's
+    assert res.loc["signal", "status"].startswith("failed")
 
 
 def test_sample_associations_rejects_covariate_varying_within_group():
     sa = _samples()
     sa.obs["image_qc"] = np.arange(sa.n_obs, dtype=float)  # differs between the images of a patient
-    with pytest.raises(ValueError, match="constant within groups"):
-        sample_associations(sa, "~ C(condition) + image_qc", groups="patient")
+    with pytest.raises(ValueError, match="constant within replicates"):
+        sample_associations(sa, "~ C(condition) + image_qc", replicate_key="patient")
 
 
 def test_sample_associations_mixedlm_needs_repeated_groups():
     sa = _samples(per_patient=1)
     with pytest.raises(ValueError, match="single sample"):
-        sample_associations(sa, "~ C(condition)", method="mixedlm", groups="patient")
+        sample_associations(sa, "~ C(condition)", method="mixedlm", replicate_key="patient")
 
 
 def test_sample_associations_ignores_columns_named_inside_terms():
@@ -220,7 +221,27 @@ def test_sample_associations_ignores_columns_named_inside_terms():
 
 
 def test_sample_associations_validates():
-    with pytest.raises(ValueError, match="needs `groups`"):
+    with pytest.raises(ValueError, match="needs `replicate_key`"):
         sample_associations(_samples(), "~ C(condition)", method="mixedlm")
     with pytest.raises(ValueError, match="duration_key"):
         sample_associations(_samples(), "~ 1", method="cox")
+    with pytest.raises(ValueError, match="right-hand side"):
+        sample_associations(_samples(), "signal ~ C(condition)")
+    with pytest.raises(ValueError, match="no term"):
+        sample_associations(_samples(), "~ 1")
+
+
+def test_sample_associations_reports_untested_features():
+    sa = _samples()
+    sa.var["kind"] = ["a", "b"]
+    sa.X[:, 1] = 1.0  # constant
+    res = sample_associations(sa, "~ C(condition)").set_index("feature")
+    assert list(res.columns[:2]) == ["kind", "term"]
+    assert res.loc["signal", "status"] == "ok"
+    assert res.loc["null", "status"] == "constant"
+    assert np.isnan(res.loc["null", ["pval", "pval_adj"]].astype(float)).all()
+    assert res.loc["null", "term"] == res.loc["signal", "term"]  # same family, missing p-value
+
+    res = sample_associations(sa, "~ C(condition)", min_samples=1000)  # nothing tested
+    assert set(res["status"]) == {"too few samples"}
+    assert {"pval", "pval_adj", "kind"} <= set(res.columns)

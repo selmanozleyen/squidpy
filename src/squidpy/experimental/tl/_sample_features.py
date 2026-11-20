@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import re
 import warnings
-from collections.abc import Sequence
 from typing import Literal
 
 import numpy as np
@@ -27,6 +26,7 @@ from squidpy.gr._utils import _assert_categorical_obs, _assert_connectivity_key,
 __all__ = ["sample_associations", "sample_features"]
 
 _RESERVED = "_y"
+_COX_TERM = "feature"
 
 
 def _in_formula(column: str, rhs: str) -> bool:
@@ -187,24 +187,23 @@ def _require_full_rank(exog: np.ndarray) -> None:
 
 def _fit_one(
     df: pd.DataFrame,
-    formula: str,
+    rhs: str,
     *,
     method: str,
-    groups: str | None,
+    replicate_key: str | None,
     duration_key: str | None,
     event_key: str | None,
 ) -> pd.DataFrame:
     import statsmodels.formula.api as smf
     from statsmodels.duration.hazard_regression import PHReg
 
-    rhs = formula.split("~", 1)[-1].strip()
     if method == "ols":
         res = smf.ols(f"{_RESERVED} ~ {rhs}", df).fit()
         _require_full_rank(res.model.exog)
         terms = [t for t in res.params.index if t != "Intercept"]
         stat = res.tvalues
     elif method == "mixedlm":
-        res = smf.mixedlm(f"{_RESERVED} ~ {rhs}", df, groups=groups).fit(reml=True)
+        res = smf.mixedlm(f"{_RESERVED} ~ {rhs}", df, groups=replicate_key).fit(reml=True)
         _require_full_rank(res.model.exog)
         terms = [t for t in res.fe_params.index if t != "Intercept"]
         stat = res.tvalues
@@ -213,18 +212,10 @@ def _fit_one(
         model = PHReg.from_formula(f"{duration_key} ~ {covariates}", df, status=df[event_key].to_numpy())
         _require_full_rank(model.exog)
         res = model.fit()
-        names = res.model.exog_names
-        params, bse = pd.Series(res.params, index=names), pd.Series(res.bse, index=names)
-        z = params / bse
-        pval = pd.Series(res.pvalues, index=names)
+        i = res.model.exog_names.index(_RESERVED)
+        coef, se = res.params[i], res.bse[i]
         return pd.DataFrame(
-            {
-                "term": [_RESERVED],
-                "coef": [params[_RESERVED]],
-                "se": [bse[_RESERVED]],
-                "stat": [z[_RESERVED]],
-                "pval": [pval[_RESERVED]],
-            }
+            {"term": [_COX_TERM], "coef": [coef], "se": [se], "stat": [coef / se], "pval": [res.pvalues[i]]}
         )
     return pd.DataFrame(
         {
@@ -238,111 +229,142 @@ def _fit_one(
 
 
 def sample_associations(
-    sample_adata: AnnData,
+    adata: AnnData,
     formula: str,
     *,
     method: Literal["ols", "mixedlm", "cox"] = "ols",
-    groups: str | None = None,
+    replicate_key: str | None = None,
     duration_key: str | None = None,
     event_key: str | None = None,
-    features: Sequence[str] | None = None,
     min_samples: int = 5,
     corr_method: str | None = "fdr_bh",
 ) -> pd.DataFrame:
     """
     Test every sample-level feature for association with sample-level covariates.
 
-    The unit of replication is the sample (or the group of samples given by ``groups``), never the cell.
+    The unit of replication is the sample (or the group of samples given by ``replicate_key``), never the cell.
+    To test a subset of features, pass a view, e.g. ``adata[:, adata.var["kind"] == "log2fe"]``; multiple testing
+    is corrected over the features passed.
 
     Parameters
     ----------
-    sample_adata
+    adata
         Samples x features, e.g. from :func:`sample_features`.
     formula
-        Right-hand side of a :mod:`statsmodels` formula over columns of ``sample_adata.obs``, e.g.
+        Right-hand side of a :mod:`statsmodels` formula over columns of ``adata.obs``, e.g.
         ``'~ C(condition) + age'``. For ``'ols'`` and ``'mixedlm'`` each feature is the response. For ``'cox'``
         each feature is a covariate of survival, adjusted for the terms of ``formula`` (``'~ 1'`` for none).
     method
-        - ``'ols'`` - linear model. With ``groups``, samples are first averaged within each group (pseudobulk), so
-          each group (e.g. patient) counts once; covariates must then be constant within groups.
-        - ``'mixedlm'`` - linear mixed model with a random intercept per ``groups``, for several samples per patient.
-        - ``'cox'`` - Cox proportional hazards model of ``duration_key`` and ``event_key``. With ``groups``, samples are
-          first averaged within each group.
-    groups
-        Column of ``sample_adata.obs`` with the replication unit shared by several samples (e.g. patient).
+        - ``'ols'`` - linear model. With ``replicate_key``, samples are first averaged within each replicate
+          (pseudobulk), so each replicate (e.g. patient) counts once; covariates must then be constant within
+          replicates.
+        - ``'mixedlm'`` - linear mixed model with a random intercept per ``replicate_key``, for several samples per
+          patient.
+        - ``'cox'`` - Cox proportional hazards model of ``duration_key`` and ``event_key``. With ``replicate_key``,
+          samples are first averaged within each replicate.
+    replicate_key
+        Column of ``adata.obs`` with the unit of replication shared by several samples (e.g. patient): the unit
+        samples are averaged over for ``'ols'`` and ``'cox'``, and the random intercept for ``'mixedlm'``.
+        The average is unweighted: every sample of a replicate in which the feature is defined counts the same,
+        whatever its number of cells (``.layers['support']`` of :func:`sample_features`), so the samples averaged
+        can differ between features.
     duration_key, event_key
-        Columns of ``sample_adata.obs`` with survival time and event indicator (1 = event). Only for ``'cox'``.
-    features
-        Features to test. Default: all.
+        Columns of ``adata.obs`` with survival time and event indicator (1 = event). Only for ``'cox'``.
     min_samples
         Minimum number of observations (after dropping missing values and pseudobulking) to test a feature.
     corr_method
-        Multiple testing correction of :func:`statsmodels.stats.multitest.multipletests`, applied per term.
+        Multiple testing correction of :func:`statsmodels.stats.multitest.multipletests`, applied per term over the
+        features that were tested.
 
     Returns
     -------
-    One row per feature and term: ``coef``, ``se``, ``stat``, ``pval``, ``n`` (observations used) and
-    ``pval_adj`` if ``corr_method`` is given. For ``'cox'`` the term is the feature itself (``'_y'``).
+    One row per feature and term: the columns of ``adata.var``, ``coef``, ``se``, ``stat``, ``pval``, ``pval_adj``
+    (if ``corr_method`` is given), ``n`` (observations used) and ``status``. Every feature is reported: a feature
+    that was not tested has missing statistics and ``status`` says why (too few samples, constant, a failed or
+    rank-deficient fit); a fit that raised a convergence warning keeps its statistics, with the warning in
+    ``status``. For ``'cox'`` the term is ``'feature'``.
     """
+    from statsmodels.tools.sm_exceptions import ConvergenceWarning
+
     if method not in ("ols", "mixedlm", "cox"):
         raise ValueError(f"`method` must be 'ols', 'mixedlm' or 'cox', got {method!r}.")
-    if method == "mixedlm" and groups is None:
-        raise ValueError("`method='mixedlm'` needs `groups`.")
+    if method == "mixedlm" and replicate_key is None:
+        raise ValueError("`method='mixedlm'` needs `replicate_key`.")
     if method == "cox" and (duration_key is None or event_key is None):
         raise ValueError("`method='cox'` needs `duration_key` and `event_key`.")
-    if _RESERVED in sample_adata.obs:
-        raise ValueError(f"`sample_adata.obs` must not have a column named {_RESERVED!r}.")
+    lhs, tilde, rhs = formula.partition("~")
+    rhs = rhs.strip()
+    if not tilde or lhs.strip():
+        raise ValueError(f"`formula` must be a right-hand side such as '~ C(condition)', got {formula!r}.")
+    if method != "cox" and rhs in ("", "1", "0"):
+        raise ValueError(f"`formula` {formula!r} has no term to test.")
+    if _RESERVED in adata.obs:
+        raise ValueError(f"`adata.obs` must not have a column named {_RESERVED!r}.")
 
-    names = list(sample_adata.var_names if features is None else features)
-    x = sample_adata[:, names].X
+    names = list(adata.var_names)
+    x = adata.X
     x = np.asarray(x.toarray() if hasattr(x, "toarray") else x, dtype=float)
-    obs = sample_adata.obs
-    rhs = formula.split("~", 1)[-1]
+    obs = adata.obs
     # rows missing anything the model uses are dropped up front, so every model sees the same rows
-    used = [c for c in obs.columns if _in_formula(c, rhs) or c in (groups, duration_key, event_key)]
-    if method == "mixedlm" and obs[groups].value_counts().max() < 2:
+    used = [c for c in obs.columns if _in_formula(c, rhs) or c in (replicate_key, duration_key, event_key)]
+    if method == "mixedlm" and obs[replicate_key].value_counts().max() < 2:
         raise ValueError(
-            f"Every {groups!r} has a single sample, so a random intercept cannot be estimated and the mixed model's "
-            "tests are not calibrated. Use `method='ols'` (with one sample per group it is the same pseudobulk)."
+            f"Every {replicate_key!r} has a single sample, so a random intercept cannot be estimated and the mixed "
+            "model's tests are not calibrated. Use `method='ols'` (with one sample per replicate it is the same "
+            "pseudobulk)."
         )
-    if groups is not None and method != "mixedlm":
-        varying = [c for c in used if c != groups and obs.groupby(groups, observed=True)[c].nunique().max() > 1]
+    if replicate_key is not None and method != "mixedlm":
+        by = obs.groupby(replicate_key, observed=True)
+        varying = [c for c in used if c != replicate_key and by[c].nunique().max() > 1]
         if varying:
             raise ValueError(
-                f"Pseudobulking by {groups!r} needs covariates constant within groups; {varying} vary. "
-                "Average them per group first, or use `method='mixedlm'`."
+                f"Pseudobulking by {replicate_key!r} needs covariates constant within replicates; {varying} vary. "
+                "Average them per replicate first, or use `method='mixedlm'`."
             )
-    results = []
+    fits, skipped = [], []
     for j, name in enumerate(names):
         df = obs.assign(**{_RESERVED: x[:, j]}).dropna(subset=[_RESERVED, *used])
-        if groups is not None and method != "mixedlm":
-            agg = {c: "first" for c in df.columns if c != groups}
+        if replicate_key is not None and method != "mixedlm":
+            agg = {c: "first" for c in df.columns if c != replicate_key}
             agg[_RESERVED] = "mean"
-            df = df.groupby(groups, observed=True).agg(agg).reset_index()
-        if len(df) < min_samples or df[_RESERVED].nunique() < 2:
+            df = df.groupby(replicate_key, observed=True).agg(agg).reset_index()
+        if len(df) < min_samples:
+            skipped.append((name, len(df), "too few samples"))
             continue
-        if method == "mixedlm" and df[groups].value_counts().max() < 2:
-            continue  # only single-sample groups left for this feature: the random intercept is not identifiable
-        with warnings.catch_warnings():
-            # convergence and boundary warnings of individual fits: the fit is kept, its p-value reported as is
-            warnings.simplefilter("ignore")
+        if df[_RESERVED].nunique() < 2:
+            skipped.append((name, len(df), "constant"))
+            continue
+        if method == "mixedlm" and df[replicate_key].value_counts().max() < 2:
+            # only single-sample replicates left for this feature: the random intercept is not identifiable
+            skipped.append((name, len(df), "single-sample replicates"))
+            continue
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")  # recorded, not shown: one fit per feature
             try:
                 fit = _fit_one(
-                    df, formula, method=method, groups=groups, duration_key=duration_key, event_key=event_key
+                    df, rhs, method=method, replicate_key=replicate_key, duration_key=duration_key, event_key=event_key
                 )
-            except (np.linalg.LinAlgError, ValueError):
+            except (np.linalg.LinAlgError, ValueError) as e:
+                skipped.append((name, len(df), f"failed: {e}"))
                 continue
-        results.append(fit.assign(feature=name, n=len(df)))
-    if not results:
-        return pd.DataFrame(columns=["feature", "term", "coef", "se", "stat", "pval", "n"])
-    out = pd.concat(results, ignore_index=True)[["feature", "term", "coef", "se", "stat", "pval", "n"]]
+        conv = [str(w.message) for w in caught if issubclass(w.category, ConvergenceWarning)]
+        fits.append(fit.assign(feature=name, n=len(df), status=f"warning: {conv[0]}" if conv else "ok"))
+    # untested features get a row per term of the tested ones, so they stay in the table
+    terms = list(dict.fromkeys(t for f in fits for t in f["term"])) or ([_COX_TERM] if method == "cox" else [None])
+    rows = [r for f in fits for r in f.to_dict("records")]
+    rows += [{"feature": name, "term": t, "n": n, "status": status} for name, n, status in skipped for t in terms]
+    cols = ["feature", "term", "coef", "se", "stat", "pval", "n", "status"]
+    out = pd.DataFrame(rows, columns=cols)
     if corr_method is not None:
-        out["pval_adj"] = np.nan
+        out.insert(cols.index("pval") + 1, "pval_adj", np.nan)
         for _, idx in out.groupby("term").groups.items():
-            p = out.loc[idx, "pval"].to_numpy()
+            p = out.loc[idx, "pval"].to_numpy(dtype=float)
             ok = np.isfinite(p)
             if ok.any():
                 adj = np.full(p.shape, np.nan)
                 adj[ok] = multipletests(p[ok], method=corr_method)[1]
                 out.loc[idx, "pval_adj"] = adj
-    return out.sort_values("pval", kind="stable").reset_index(drop=True)
+    var = adata.var.drop(columns=[c for c in adata.var.columns if c in out.columns])
+    out = out.join(var, on="feature")
+    out = out[["feature", *var.columns, *(c for c in out.columns if c != "feature" and c not in var.columns)]]
+    return out.sort_values("pval", kind="stable", na_position="last").reset_index(drop=True)
